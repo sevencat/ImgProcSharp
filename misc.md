@@ -10,7 +10,7 @@
 |---|---|---|
 | 本仓库 | Apache-2.0（`LICENSE` 已存在） | 保持 |
 | `Sdcb.SimdCodecs` | MIT | 通过 NuGet 引用 1.4.0（只用解码），不拷源码 → 无许可证冲突，也不需要在包内附它的 NOTICE |
-| PNG 编码 | 不引入 | 用 `Sdcb.SimdCodecs.Png.PngWriter`（随解码依赖已存在），本仓库不含编码代码 |
+| PNG / JPEG 编码 | 不引入 | 用 `Sdcb.SimdCodecs.Png.PngWriter` 与 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（随解码依赖已存在），本仓库不含编码代码 |
 | GlyphRaster（`F:\code\zlmsharp\src\GlyphRaster`） | 作者自有代码（zlmsharp 仓库内） | 直接拷入 `ImgProcSharp.Core/Text`，保留文件头注释 |
 | 文泉驿微米黑 | Apache-2.0 / GPLv3 双许可，**含字体嵌入例外** | 随包分发，必须带 `licenses/LICENSE-WenQuanYiMicroHei.txt`；文件内容不得修改 |
 
@@ -28,7 +28,7 @@ Clean-room 声明（写进 README）：
 
 - nuget.org 上 `Sdcb.SimdCodecs` 只有 **1.0.1 / 1.1.0 / 1.2.0 / 1.3.0 / 1.4.0**（`dotnet package search --exact-match` 实测），**没有 2.0**。
 - `F:\code\SimdCodecs` 工作区 tag 最高 **v1.4.0**，`VersionMajorMinor` 已是 **2.0**，即 2.0 未发版。
-- 1.4.0 的**门面**只有解码（`SimdCodecs` 类里没有 `Encode`）；但格式子包自带编码器：`Sdcb.SimdCodecs.Png.PngWriter.Encode(rgba, w, h, options)` 是公开 API，且随元包传递引用（只用 `PackageReference Sdcb.SimdCodecs` 就能编过）。这一点一开始按「1.4.0 完全没有编码」处理过，实测是错的。
+- 1.4.0 的**门面**只有解码（`SimdCodecs` 类里没有 `Encode`）；但格式子包自带编码器：`Sdcb.SimdCodecs.Png.PngWriter.Encode(rgba, w, h, options)` 与 `Sdcb.SimdCodecs.Jpeg.JpegEncoder.Encode(pixels, w, h, channels, options)` 都是公开 API，且随元包传递引用（只用 `PackageReference Sdcb.SimdCodecs` 就能编过）。这一点一开始按「1.4.0 完全没有编码」处理过，实测是错的。
 - 门面**有** `SimdCodecs.TryReadInfo(data, out ImageInfo)`，`ImageInfo` 带 `Format` / `Width` / `Height` / `Orientation` / `FrameCount`，所以 EXIF 方向不用自己解析。
 
 因此 v1 不自己写编码器（见 §Q），**也不被 2.0 的发版节奏阻塞**。
@@ -316,7 +316,7 @@ for 开放路径两端:
 - 需要一张输入图 `samples/assets/sample.jpg`，要求：**CC0 / Public Domain**，尺寸 ≤ 1600×900，文件 ≤ 300 KB，含人像或风景（文字叠加效果明显）。
   - 建议来源：Wikimedia Commons 的 CC0 分类、Pexels/Unsplash 的 CC0 声明图（记录 URL + 作者 + 许可 + SHA-256 到 `samples/assets/README.md`）。
 - 备选（完全零风险）：**用代码生成输入图**（渐变 + 几个色块），不提交任何二进制。缺点是不像真实照片，效果说服力弱。
-- 建议两者都做：`sample.jpg` 存在就用它，不存在就现场生成。
+- 已按「两者都做」落地：`samples/ImgProcSharp.Samples` 先找 `samples/assets/sample.jpg`，找不到就 `BuildSamplePhoto()` 合成一张 1280×720 的风景（天空渐变 + 太阳光晕 + 两层山脊 + 波光图案笔刷），**并用 `JpegEncoder` 编码成真 JPEG 字节**再交给 `Image.Load` 解码——这样即便没有素材，走的也是真实的「JPEG 字节 → 解码 → 绘制 → 编码」链路，而不是绕过解码器直接拿内存画布。
 - 测试素材规则（沿用 SimdCodecs 的习惯）：大图不入库，运行期下载 + 校验哈希；小图（≤300 KB）允许入库但要记来源。测试里生成的图（棋盘、噪点、纯色）优先于素材文件。
 
 ---
@@ -336,7 +336,7 @@ for 开放路径两端:
 
 ## O. 未决问题
 
-1. **输出要不要在 0.1 就支持 JPEG？** 现在定为只出 PNG。若确实需要小体积输出，0.2 用 SimdCodecs 2.0 的 `Encode`（那时应该已发版），而不是手写 JPEG。
+1. **输出要不要在 0.1 就支持 JPEG？** 结论：支持，但不自己实现——直接用 1.4.0 的 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（§Q），示例的照片管线就走这条链，不必等 2.0 的门面 `Encode`。
 2. **示例图**：提交 CC0 照片，还是代码生成？（见 §M）
 3. **`Mutate` 的返回类型**：返回 `Image`（可链式 `Save`）还是 `void`（更干净）？当前计划返回 `Image`。
 4. **文字快路径的亚像素**：是否在 `GlyphMask` 混合时按 `penX` 的小数部分做水平线性插值（≈0.3 天，能明显改善字距）？v1 先不做，留 0.2。
@@ -362,43 +362,52 @@ for 开放路径两端:
 
 ---
 
-## Q. 输出编码：不自研，直接用 1.4.0 的 PngWriter
+## Q. 输出编码：不自研，直接用 1.4.0 的 PngWriter / JpegEncoder
 
 ### 结论
 
-`Sdcb.SimdCodecs` 1.4.0 的格式子包自带编码器（`Sdcb.SimdCodecs.Png.PngWriter`，公开 API，随元包传递引用），「画布 → PNG」不需要本库实现：
+`Sdcb.SimdCodecs` 1.4.0 的格式子包自带编码器（`Sdcb.SimdCodecs.Png.PngWriter`、`Sdcb.SimdCodecs.Jpeg.JpegEncoder`，都是公开 API，随元包传递引用），「画布 → 文件」不需要本库实现：
 
 ```csharp
 byte[] straight = new byte[canvas.Width * canvas.Height * 4];
 canvas.CopyToStraight(straight, canvas.Width * 4);
-byte[] png = PngWriter.Encode(straight, canvas.Width, canvas.Height);
+
+byte[] png = PngWriter.Encode(straight, canvas.Width, canvas.Height);                       // 无损
+byte[] jpg = JpegEncoder.Encode(straight, canvas.Width, canvas.Height, 4, new JpegEncodeOptions
+{
+    Quality = 92,                 // 1..100
+    OptimizeHuffman = true,
+    IccProfile = image.IccProfile, // 原样带走色彩空间，空则写不进段
+});
 ```
 
-- **不放进公开 API**：v1 没有 `Image.Save` / `EncodePng`。多格式输出、`PngOptions`（压缩级别、iCCP、sRGB 块）等真实需求出现再包一层，不为「可能的调用方」提前维护编码器。
-- **只用在测试里**：解码测试需要 PNG 素材，直接用 `PngWriter` 现造，省掉 `assets/` 里的二进制文件，也顺带验证「别人编码器写出来的东西我们能读」。
-- **为什么不自研**：原本计划手写 200 行（IHDR/IDAT/IEND + 滤波 + CRC32 + `ZLibStream`）。1.4.0 已有公开 `PngWriter` 后，自研的唯一收益是「不依赖第三方编码」——但包本来就依赖 `Sdcb.SimdCodecs` 解码，多这一个类型不增加依赖面，反而多 200 行要维护、要调滤波启发式、要背预览器兼容性。已落地过的 `PngCrc32.cs` 一并删掉。
+- **不放进公开 API**：v1 没有 `Image.Save` / `EncodePng` / `EncodeJpeg`。多格式输出、`PngOptions`（压缩级别、iCCP、sRGB 块）、JPEG 的 `Subsampling`/`Progressive` 等真实需求出现再包一层，不为「可能的调用方」提前维护编码器。
+- **只用在测试与示例里**：解码测试需要 PNG 素材，直接用 `PngWriter` 现造，省掉 `assets/` 里的二进制文件；示例的照片管线则用 `JpegEncoder` 造素材 + 出成品，一条命令跑通「解码 → 绘制 → 编码」。
+- **为什么不自研**：原本计划手写 200 行（IHDR/IDAT/IEND + 滤波 + CRC32 + `ZLibStream`）。1.4.0 已有公开 `PngWriter` 后，自研的唯一收益是「不依赖第三方编码」——但包本来就依赖 `Sdcb.SimdCodecs` 解码，多这一个类型不增加依赖面，反而多 200 行要维护、要调滤波启发式、要背预览器兼容性。已落地过的 `PngCrc32.cs` 一并删掉。JPEG 更极端：baseline DCT + 量化表 + 霍夫曼表是几千行的坑，绝不自研。
 
-### 为什么示例输出仍然选 PNG
+### 为什么示例产出 PNG 与 JPEG 各一张
 
 | 格式 | 体积 | 查看器支持 | 说明 |
 |---|---|---|---|
-| **PNG** | 中 | 全平台原生 | 示例产出用它，`PngWriter` 一行 |
-| BMP | 大 | 全平台 | 32 bpp 无压缩，示例图能到几 MB |
-| JPEG | 小 | 全平台 | 编码画质参数是另一个无底洞，v1 不做 |
+| **PNG** | 中 | 全平台原生 | 矢量海报与对比拼图用它（`result.png`、`compare.png`），`PngWriter` 一行 |
+| BMP | 大 | 全平台 | 32 bpp 无压缩，示例图能到几 MB，不选 |
+| **JPEG** | 小 | 全平台 | 照片管线用它（`photo.jpg`）；有损压缩会放大描边锯齿，正好当「肉眼验收」的对照，与原图并排拼在 `compare.png` 里对比 |
 
-### 用法与注意点（测试里）
+### 用法与注意点
 
-- **直通像素**：`PngWriter` 收非预乘 RGBA8，`Canvas` 是预乘的，必须先 `CopyToStraight`（内部做 unpremultiply；`a<255` 时有 ±1 量化误差，这正是解码保真测试允许 ±1 的来源）。
-- **不要拿它做逐字节回归基准**：不同版本可能选不同行滤波，字节会变；断言要落在「解码回来的像素」上。
-- **方向**：PNG 素材本身正向，测试里不要对解码结果再 `ApplyOrientation`；方向逻辑由 `Image.ApplyOrientation` 的幂等性保证（应用后 `Orientation` 归位 `Normal`）。
+- **直通像素**：两个编码器都收非预乘 RGBA8，`Canvas` 是预乘的，必须先 `CopyToStraight`（内部做 unpremultiply；`a<255` 时有 ±1 量化误差，这正是解码保真测试允许 ±1 的来源）。
+- **JPEG 的入参**：`Encode(pixels, w, h, channels, options)` 的 `channels` 给 4 就按 RGBA 逐行读、alpha 直接忽略；`stride` 必须是 `w * channels`（紧密排列，`straight` 正好满足）。给 3 则要求 RGB 缓冲，需要自己拆通道。
+- **不要拿它做逐字节回归基准**：PNG 不同版本可能选不同行滤波，JPEG 的熵编码、量化表也可能变；断言要落在「解码回来的像素」上。
+- **方向**：`Image.Load` 之后先 `ApplyOrientation()` 再画，`JpegEncoder` 不会替你写 EXIF 方向（`JpegEncodeOptions.Exif` 传原图 EXIF 会连旧方向一起写进去，示例故意不传）。
 
 ### 验证方式
 
 ```
 PngWriter 写 PNG → Image.Load 解码 → 与原始 Canvas 逐像素比对（±1）
+JpegEncoder 写 JPEG → Image.Load 解码 → 尺寸/朝向正确、像素差在 lossy 预期内（示例肉眼验收）
 ```
 
-这条往返覆盖解码桥的尺寸、格式、行切片、预乘；编码器本身是第三方库，不在本库的测试责任内。
+第一条往返覆盖解码桥的尺寸、格式、行切片、预乘；编码器本身是第三方库，不在本库的单元测试责任内，所以 JPEG 只做端到端示例，不写像素级断言。
 
 ---
 
@@ -699,7 +708,7 @@ user = (px + 0.5) * M⁻¹
 ### AOT
 
 - `samples/ImgProcSharp.AotSmoke`（`PublishAot=true`）实测 win-x64 自包含 **9.8 MB**，输出
-  `dims=320x200 png=10403 render=0D1AD94271F2DAE8 decode=0D1AD94271F2DAE8 ink=54828`，与 JIT 逐字节一致。
+  `dims=320x200 png=10413 render=C763804986BB6615 decode=C763804986BB6615 ink=54828`，与 JIT 逐字节一致（0.2 渐变行游标优化后的参考值，见 §AA）。
 - 库里没有运行时代码生成：字体解析、路径展平、扫描线都是数组 + 泛型实例化，`IsAotCompatible` 分析器 0 警告。
 - 除了 `InvariantGlobalization=true` 没做额外裁剪配置（也没有文化相关格式化可用）。
 
@@ -717,8 +726,8 @@ user = (px + 0.5) * M⁻¹
 | 用例 | 耗时 | 备注 |
 |---|---|---|
 | 纯色矩形 1024×768 | 1.2 ms | 矩形快路径，1.6 ns/px ≈ 内存带宽 |
-| 线性渐变矩形 1024×768 | 13.3 ms | 17 ns/px，是纯色的 10.9 倍 |
-| 线性渐变三角形（半画布） | 6.5 ms | 与面积成正比，说明瓶颈在逐像素采样 |
+| 线性渐变矩形 1024×768 | 8.6 ms | 11 ns/px，纯色的 7.1 倍（行游标前 13.3 ms / 10.9 倍，见 §AA） |
+| 线性渐变三角形（半画布） | 4.3 ms | 与面积成正比，说明瓶颈在逐像素采样（优化前 6.5 ms） |
 | 1000 段折线描边（宽 4） | 5.0 ms | 补活动边表前是 43 ms |
 | 大圆描边（半径 320） | 1.2–1.4 ms | |
 | 32 px 文字 24 字形（掩码） | 41 µs | 0.9 KB 分配 |
@@ -728,7 +737,7 @@ user = (px + 0.5) * M⁻¹
 | PNG 编码 800×600 | 12.6 ms | `PngWriter` |
 | 解码 + 画 + 编码 | 15.2 ms | 编码占绝对大头 |
 
-渐变是下一个明显的优化点（10.9× 纯色），但那是 0.2 的事：优先做「每行预计算参数增量」而不是上 SIMD，代码可读性代价小得多。基准只用来「别把数量级搞错」，不进 CI 门禁——共享虚拟机的频率波动会让绝对值失去意义。
+渐变仍是这里最贵的一项（7.1× 纯色），0.2 的第一刀已经砍过：每行预计算参数增量（§AA），而不是上 SIMD——SIMD 要重写整个混合内核，在这一层看不出收益，代码可读性代价却大得多。基准只用来「别把数量级搞错」，不进 CI 门禁——共享虚拟机的频率波动会让绝对值失去意义。
 
 ---
 
@@ -817,4 +826,48 @@ m = vertex + r · (n1 + n2) / (1 + n1·n2)
 ### 测试
 
 `StrokeStyleTests`（15 个用例）覆盖：三种端帽的边界位置、三种连接的形状差异、`MiterLimit` 退回 bevel、虚线相位与 `DashOffset`、图案随线宽/变换缩放、闭合方形四边缺口、跨起点的虚线合并（外角不能缺口）、超长图案退化成实线（逐像素比对）、`IPen` 默认成员、非法样式与 `Pen` 归一化。用例里的像素坐标都是按几何算出来的（例如 90° 转角 miter 伸出 `r·√2`），不是「跑一次记下来」的黄金值。
+
+---
+
+## AA. 渐变行游标（0.2 性能优化落地笔记）
+
+### 原来的瓶颈：每像素都在算几何
+
+优化前每个像素都要走一遍 `ParameterAt(x, y)`：线性渐变是两次点积 + 一次除法，径向渐变是两次除法 + 一次开方；再线性扫一遍停止点表找区间。1024×768 的矩形 13.3 ms，是纯色填充的 10.9 倍（§Y 的基准表）。
+
+一条渐变的参数沿画布 x 方向是**解析**的：
+
+- 线性渐变 `t(x) = t0 + dt·(x - x0)`，一阶差分即可（`Ddu = 0`）；
+- 径向渐变 `q = nx² + ny²` 是 x 的**二次**函数，用二阶差分推进，每像素只剩一次开方。
+
+于是 `GradientRowCursor{U, Du, Ddu, SquareRoot}` 只保存三个 float，`Step()` 就是两次加法。行起点由子类算一次（`TryCreateRowCursor(x0, y)`），热循环里没有点积、没有除法、没有矩阵乘。
+
+### 逆变换：导数就是逆矩阵第一列
+
+笔刷跟随变换（§Y）时采样前要过一遍 `M⁻¹`。画布 x 前进 1 px，用户坐标前进的量恰好是逆矩阵的第一列 `(M11, M12)`，所以有逆矩阵时 `stepX/stepY` 直接取它，起点用一次完整变换即可。
+
+踩到的坑：径向渐变在**没有**逆矩阵时 `ny` 与 x 无关，`duy` 必须是 0。写成 `duy = ay` 会让 `Ddu = 2(dux² + duy²)` 把二次项算成两倍，`q` 每步被推大，圆心直接变黑——`RadialGradientIsSymmetricAroundCenter` 与 `RadialGradientGoesFromCenterToEdge` 立刻抓住。
+
+### 段游标要能双向走
+
+`SampleColorAt(t, ref segment, ...)` 复用跨像素的区间游标：参数单调前进时只做一次比较。但径向渐变的参数一行内先减后增（左半边朝圆心走），所以游标有两个循环——往前推进和往后退回。少了后退那个，左半边会一直停在最后一个区间，整行变成终点色。
+
+### 两条路径的差要能被证明只有 1 LSB
+
+`TryCreateRowCursor` 是 `internal virtual`，默认返回 `false`：外部派生的 `GradientBrush` 仍走逐像素 `ParameterAt` 慢路径（`CustomGradientBrushFallsBackToParameterAt` 盯住）。快慢两条路径共用同一个 `BlendPixel`，混合阶段逐字节相同。
+
+`BlendPixel` 顺带加了一条不透明全覆盖直写（`coverage == 255 && sa > 254.5`）：混合恒等式此时的结果就是源色，省掉 4 次 `Mul255` 和读-改-写。与通用路径逐字节一致（`a = 255`、`inv = 0`、`Mul255(x, 255) == x`），不是「看起来差不多」。
+
+但参数**算不出来一样的位**：差分是 `t0 + k·dt + k²·ddu` 的累计，慢路径每像素重算点积与除法，两者在 float 的最后一位上必然有出入。所以这里的约束不是「逐字节相同」而是「不超过 1 LSB」——`IncrementalGradientMatchesPerPixelPathWithinOneLsb` 用两个镜像派生类（线性、径向各一个，逐像素重算 `ParameterAt`）整缓冲区比对，断言最大通道差 ≤ 1；真出现结构性错误（符号、二次项、段游标）时差值是几十到几百，立刻掉出来。
+
+副作用：AOT smoke 的参考哈希因此变了一次（png 10403 → 10413），§Y 已同步。重排浮点表达式就会动渲染结果，这是「像素级确定性」的代价，值得写清楚而不是假装逐字节不变。
+
+### 结果与剩下的空间
+
+| 用例 | 优化前 | 优化后 |
+|---|---|---|
+| 线性渐变矩形 1024×768 | 13.3 ms / 10.9× 纯色 | 8.6 ms / 7.1× 纯色 |
+| 线性渐变三角形（半画布） | 6.5 ms | 4.3 ms |
+
+每像素仍有分支、夹住、4 次 float→byte，径向渐变还有一次 `sqrt`。再往下砍的方向是「2 停顿时特化 + 去掉 clamp 分支」，收益是常数级；SIMD 得重写混合内核，不在这一层做。0.2 的优先级是混合模式与图层，渐变优化到此为止。
 

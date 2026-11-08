@@ -1,3 +1,4 @@
+using System.Numerics;
 using Xunit;
 
 namespace ImgProcSharp.Tests;
@@ -396,5 +397,161 @@ public class GradientAndArcTests
 
         Assert.InRange(AlphaArea(canvas), Math.PI * 400 * 0.97, Math.PI * 400 * 1.03);
         Assert.True(canvas.GetColor(0, 0).A == 0);
+    }
+
+    [Fact]
+    public void RadialGradientIsSymmetricAroundCenter()
+    {
+        using Canvas canvas = Canvas.Create(200, 200, Color.White);
+
+        // 圆心放在像素中心 (100.5, 100.5)，四个方向的对称点才是整数像素下标
+        var brush = new RadialGradientBrush(
+            new PointF(100.5f, 100.5f),
+            60f,
+            new ColorStop(0f, new Color(255, 0, 0)),
+            new ColorStop(1f, new Color(0, 0, 255)));
+
+        new DrawingContext(canvas).Fill(brush, new RectangularPolygon(0, 0, 200, 200));
+
+        // 圆形渐变关于圆心旋转对称：同一半径上的四个方向必须是同一个颜色。
+        // 行游标的二阶差分只沿 x 推进，ny 项若被错误地当成随 x 变化，这里会立刻不对称。
+        foreach (int d in new[] { 10, 25, 40 })
+        {
+            Color right = canvas.GetColor(100 + d, 100);
+            Color left = canvas.GetColor(100 - d, 100);
+            Color down = canvas.GetColor(100, 100 + d);
+            Color up = canvas.GetColor(100, 100 - d);
+
+            Assert.InRange(Math.Abs(right.R - down.R), 0, 1);
+            Assert.InRange(Math.Abs(right.R - left.R), 0, 1);
+            Assert.InRange(Math.Abs(right.R - up.R), 0, 1);
+        }
+
+        // 半径 30 处 t = 0.5：红 → 蓝的中点
+        Color middle = canvas.GetColor(130, 100);
+        Assert.InRange(middle.R, 122, 133);
+        Assert.InRange(middle.B, 122, 133);
+    }
+
+    [Fact]
+    public void RadialGradientFollowsRotation()
+    {
+        // 宽高不同的椭圆旋转 90° 后形状变了，因此能验证「逆矩阵 + 二次差分」这条路径
+        var brush = new RadialGradientBrush(
+            new PointF(100, 100),
+            new SizeF(80f, 20f),
+            new ColorStop(0f, new Color(255, 0, 0)),
+            new ColorStop(1f, new Color(0, 0, 255)));
+
+        using Canvas canvas = Canvas.Create(200, 200, Color.White);
+        var context = new DrawingContext(canvas);
+        context.PushTransform(Matrix3x2.CreateRotation(MathF.PI / 2f, new Vector2(100f, 100f)));
+        context.Fill(brush, new RectangularPolygon(0, 0, 200, 200));
+
+        // 用户 (160,100) 在椭圆长轴上，t = 60/80 = 0.75；旋转后落在画布 (100,160)
+        Assert.InRange(canvas.GetColor(100, 160).R, 55, 72);
+
+        // 用户 (140,100)：t = 40/80 = 0.5 → 中段紫色
+        Color middle = canvas.GetColor(100, 140);
+        Assert.InRange(middle.R, 118, 134);
+        Assert.InRange(middle.B, 118, 134);
+    }
+
+    [Fact]
+    public void CustomGradientBrushFallsBackToParameterAt()
+    {
+        // 外部派生类没有行游标，必须走逐像素 ParameterAt 的慢路径（行为与 0.2 之前一致）
+        using Canvas canvas = Canvas.Create(80, 40, Color.White);
+        new DrawingContext(canvas).Fill(new HorizontalBrush(60f), new RectangularPolygon(0, 0, 80, 40));
+
+        Assert.InRange(canvas.GetColor(0, 5).R, 0, 12);
+        Assert.InRange(canvas.GetColor(30, 5).R, 118, 138);
+        Assert.InRange(canvas.GetColor(60, 5).R, 248, 255);
+
+        // 同一列不同行必须完全一致（参数只依赖 x）
+        Assert.Equal(canvas.GetColor(30, 5), canvas.GetColor(30, 35));
+    }
+
+    [Fact]
+    public void IncrementalGradientMatchesPerPixelPathWithinOneLsb()
+    {
+        // 行游标是差分累计，逐像素路径每像素重算几何：两者参数只差最后一个 float ulp，
+        // 映射到 8 位颜色后不应超过 1 LSB。更大的差说明差分推错了，不是浮点噪声。
+        // 只比「不跟随变换」的情形：自定义派生类不跟随变换（§Y），带变换时两条路径看到的坐标系不同。
+        ColorStop[] stops =
+        [
+            new(0f, Color.Red),
+            new(0.5f, Color.White),
+            new(1f, new Color(0, 0, 255)),
+        ];
+
+        var from = new PointF(10f, 20f);
+        var to = new PointF(170f, 120f);
+        Compare(new LinearGradientBrush(from, to, stops), new LinearMirrorBrush(from, to, stops));
+
+        // 径向渐变走二阶差分 + 每像素开方，误差特征与线性不同，单独比一次
+        var center = new PointF(90f, 70f);
+        var radius = new SizeF(70f, 50f);
+        Compare(new RadialGradientBrush(center, radius, stops), new RadialMirrorBrush(center, radius, stops));
+
+        void Compare(GradientBrush fastBrush, GradientBrush slowBrush)
+        {
+            using Canvas fast = Canvas.Create(180, 140, Color.White);
+            using Canvas slow = Canvas.Create(180, 140, Color.White);
+            var region = new RectangularPolygon(0, 0, 180, 140);
+
+            new DrawingContext(fast).Fill(fastBrush, region);
+            new DrawingContext(slow).Fill(slowBrush, region);
+
+            int max = 0;
+            for (int y = 0; y < 140; y++)
+            {
+                ReadOnlySpan<byte> a = fast.GetRow(y);
+                ReadOnlySpan<byte> b = slow.GetRow(y);
+                for (int i = 0; i < a.Length; i++)
+                {
+                    max = Math.Max(max, Math.Abs(a[i] - b[i]));
+                }
+            }
+
+            Assert.InRange(max, 0, 1);
+        }
+    }
+
+    /// <summary>自定义渐变：参数就是 x / width，用来覆盖「没有行游标」的兜底路径。</summary>
+    private sealed class HorizontalBrush(float width)
+        : GradientBrush([new ColorStop(0f, Color.Black), new ColorStop(1f, Color.White)])
+    {
+        protected override float ParameterAt(float x, float y) => x / width;
+    }
+
+    /// <summary>与 <see cref="LinearGradientBrush"/> 同几何的自定义派生类：逐像素重算参数，用作行游标的对照。</summary>
+    private sealed class LinearMirrorBrush(PointF from, PointF to, ColorStop[] stops) : GradientBrush(stops)
+    {
+        protected override float ParameterAt(float x, float y)
+        {
+            float dx = to.X - from.X;
+            float dy = to.Y - from.Y;
+            float lengthSquared = (dx * dx) + (dy * dy);
+            return lengthSquared <= 1e-12f ? 1f : (((x - from.X) * dx) + ((y - from.Y) * dy)) / lengthSquared;
+        }
+    }
+
+    /// <summary>与 <see cref="RadialGradientBrush"/> 同几何的自定义派生类：校验「二阶差分 + 开方」。</summary>
+    private sealed class RadialMirrorBrush(PointF center, SizeF radius, ColorStop[] stops) : GradientBrush(stops)
+    {
+        protected override float ParameterAt(float x, float y)
+        {
+            float ax = MathF.Abs(radius.Width);
+            float ay = MathF.Abs(radius.Height);
+            if (ax <= 1e-6f || ay <= 1e-6f)
+            {
+                return 1f;
+            }
+
+            float nx = (x - center.X) / ax;
+            float ny = (y - center.Y) / ay;
+            return MathF.Sqrt((nx * nx) + (ny * ny));
+        }
     }
 }

@@ -29,6 +29,39 @@ public readonly struct ColorStop : IEquatable<ColorStop>
 }
 
 /// <summary>
+/// 一行内沿 x 方向的渐变参数游标：<c>U</c> 是当前像素的参数（线性渐变就是 t，径向渐变是到圆心距离的平方），
+/// 每前进一个像素做一次二阶差分。
+/// <para>
+/// 一行的参数只依赖 <c>U</c>、<c>Du</c>、<c>Ddu</c> 三个数，热循环里因此没有点积、除法或矩阵乘：
+/// 线性渐变 <c>Ddu = 0</c>（一阶差分），径向渐变是 x 的二次函数（二阶差分）。
+/// </para>
+/// </summary>
+internal struct GradientRowCursor
+{
+    /// <summary>当前像素的参数值。</summary>
+    public float U;
+
+    /// <summary>一阶差分（下一像素相对当前像素的增量）。</summary>
+    public float Du;
+
+    /// <summary>二阶差分（每步给 <see cref="Du"/> 的增量），线性渐变为 0。</summary>
+    public float Ddu;
+
+    /// <summary>是否对 <see cref="U"/> 取平方根才是渐变参数（径向渐变）。</summary>
+    public bool SquareRoot;
+
+    /// <summary>当前像素的渐变参数。开方前夹一下，避免差分误差把 <c>U</c> 推到负数。</summary>
+    public readonly float Parameter => SquareRoot ? MathF.Sqrt(U > 0f ? U : 0f) : U;
+
+    /// <summary>前进一个像素。</summary>
+    public void Step()
+    {
+        U += Du;
+        Du += Ddu;
+    }
+}
+
+/// <summary>
 /// 渐变笔刷的公共部分：停止点归一化、预乘插值、逐像素混合、可选 4×4 ordered dither。
 /// <para>
 /// 插值在**预乘空间**做：否则「透明黑 → 不透明白」会在中段出现灰色脏边，
@@ -51,6 +84,16 @@ public abstract class GradientBrush : IBrush
     private readonly float[] _stopsG;
     private readonly float[] _stopsB;
     private readonly float[] _stopsA;
+
+    // 每个区间的预计算：起点、1/跨度、四通道增量。热循环里因此没有除法，也不用每像素扫停止点表
+    private readonly float[] _offsets;
+    private readonly float[] _segFrom;
+    private readonly float[] _segInvSpan;
+    private readonly float[] _segR;
+    private readonly float[] _segG;
+    private readonly float[] _segB;
+    private readonly float[] _segA;
+
     private readonly bool _uniform;
     private readonly Color _uniformColor;
 
@@ -91,6 +134,32 @@ public abstract class GradientBrush : IBrush
 
         _uniform = uniform;
         _uniformColor = array[0].Color;
+
+        int last = array.Length - 1;
+        _offsets = new float[array.Length];
+        _segFrom = new float[last];
+        _segInvSpan = new float[last];
+        _segR = new float[last];
+        _segG = new float[last];
+        _segB = new float[last];
+        _segA = new float[last];
+
+        for (int i = 0; i < array.Length; i++)
+        {
+            _offsets[i] = array[i].Offset;
+        }
+
+        for (int i = 0; i < last; i++)
+        {
+            float from = _offsets[i];
+            float span = _offsets[i + 1] - from;
+            _segFrom[i] = from;
+            _segInvSpan[i] = span > 0f ? 1f / span : 0f;
+            _segR[i] = _stopsR[i + 1] - _stopsR[i];
+            _segG[i] = _stopsG[i + 1] - _stopsG[i];
+            _segB[i] = _stopsB[i + 1] - _stopsB[i];
+            _segA[i] = _stopsA[i + 1] - _stopsA[i];
+        }
     }
 
     /// <summary>是否对颜色做 4×4 ordered dither（长渐变上抑制色带，默认关闭）。</summary>
@@ -113,6 +182,12 @@ public abstract class GradientBrush : IBrush
     private readonly Matrix3x2 _inverse = Matrix3x2.Identity;
     private readonly bool _hasInverse;
 
+    /// <summary>是否挂了非恒等逆矩阵（内置派生类搭行游标时用）。</summary>
+    internal bool HasInverseTransform => _hasInverse;
+
+    /// <summary>画布 → 用户的逆矩阵（内置派生类搭行游标时用）。</summary>
+    internal Matrix3x2 InverseTransformMatrix => _inverse;
+
     /// <summary>停止点（按 offset 升序）。</summary>
     public IReadOnlyList<ColorStop> Stops => _stops;
 
@@ -130,6 +205,16 @@ public abstract class GradientBrush : IBrush
     /// </para>
     /// </summary>
     internal virtual GradientBrush WithInverseTransform(Matrix3x2 inverse) => this;
+
+    /// <summary>
+    /// 内置渐变给出一行的参数游标（起点 + 差分），快路径因此没有逐像素虚调用、点积和除法。
+    /// 外部派生类默认返回 <c>false</c>，退化为逐像素 <see cref="ParameterAt"/>。
+    /// </summary>
+    internal virtual bool TryCreateRowCursor(int x0, int y, out GradientRowCursor cursor)
+    {
+        cursor = default;
+        return false;
+    }
 
     public void Blend(Canvas canvas, Rectangle region, ReadOnlySpan<byte> coverage, int coverageStride)
     {
@@ -153,9 +238,53 @@ public abstract class GradientBrush : IBrush
     /// <param name="absoluteY">该行的画布 y 坐标。</param>
     protected void BlendRow(Span<byte> row, ReadOnlySpan<byte> coverageRow, int absoluteX, int absoluteY)
     {
+        if (TryCreateRowCursor(absoluteX, absoluteY, out GradientRowCursor cursor))
+        {
+            BlendRowIncremental(row, coverageRow, absoluteX, absoluteY, cursor);
+            return;
+        }
+
+        BlendRowPerPixel(row, coverageRow, absoluteX, absoluteY);
+    }
+
+    /// <summary>
+    /// 内置渐变的快路径：参数沿 x 走差分，每像素只剩「取参数 → 夹住 → 查区间 → 四通道线性插值」。
+    /// </summary>
+    private void BlendRowIncremental(
+        Span<byte> row,
+        ReadOnlySpan<byte> coverageRow,
+        int absoluteX,
+        int absoluteY,
+        GradientRowCursor cursor)
+    {
+        int segment = 0;
         for (int i = 0, o = 0; i < coverageRow.Length; i++, o += Canvas.BytesPerPixel)
         {
-            byte coverage = coverageRow[i];
+            float t = cursor.Parameter;
+            cursor.Step();
+
+            int coverage = coverageRow[i];
+            if (coverage == 0)
+            {
+                continue;
+            }
+
+            if (Dither)
+            {
+                t += GetDitherOffset(absoluteX + i, absoluteY) / 255f;
+            }
+
+            SampleColorAt(Math.Clamp(t, 0f, 1f), ref segment, out float sr, out float sg, out float sb, out float sa);
+            BlendPixel(row, o, coverage, sr, sg, sb, sa);
+        }
+    }
+
+    /// <summary>外部派生类的慢路径：保持原来的逐像素 <see cref="ParameterAt"/> 语义。</summary>
+    private void BlendRowPerPixel(Span<byte> row, ReadOnlySpan<byte> coverageRow, int absoluteX, int absoluteY)
+    {
+        for (int i = 0, o = 0; i < coverageRow.Length; i++, o += Canvas.BytesPerPixel)
+        {
+            int coverage = coverageRow[i];
             if (coverage == 0)
             {
                 continue;
@@ -163,20 +292,40 @@ public abstract class GradientBrush : IBrush
 
             float offset = Dither ? GetDitherOffset(absoluteX + i, absoluteY) : 0f;
             SamplePremultiplied(absoluteX + i, absoluteY, offset, out float sr, out float sg, out float sb, out float sa);
-
-            int a = PixelOps.Mul255((int)MathF.Round(Math.Clamp(sa, 0f, 255f)), coverage);
-            if (a == 0)
-            {
-                continue;
-            }
-
-            int inv = 255 - a;
-            row[o] = (byte)Math.Min(255, PixelOps.Mul255((int)sr, coverage) + PixelOps.Mul255(row[o], inv));
-            row[o + 1] = (byte)Math.Min(255, PixelOps.Mul255((int)sg, coverage) + PixelOps.Mul255(row[o + 1], inv));
-            row[o + 2] = (byte)Math.Min(255, PixelOps.Mul255((int)sb, coverage) + PixelOps.Mul255(row[o + 2], inv));
-            row[o + 3] = (byte)Math.Min(255, a + PixelOps.Mul255(row[o + 3], inv));
+            BlendPixel(row, o, coverage, sr, sg, sb, sa);
         }
     }
+
+    /// <summary>把预乘颜色按覆盖率混进目标行。两个采样路径共用，保证像素结果一致。</summary>
+    private static void BlendPixel(Span<byte> row, int o, int coverage, float sr, float sg, float sb, float sa)
+    {
+        if (coverage == 255 && sa > 254.5f)
+        {
+            // 全覆盖 + 不透明：混合恒等式的结果就是源色，省掉读-改-写和 4 次 Mul255
+            // （与下方通用路径逐字节一致：a = 255、inv = 0、Mul255(x, 255) == x）
+            row[o] = ClampByte(sr);
+            row[o + 1] = ClampByte(sg);
+            row[o + 2] = ClampByte(sb);
+            row[o + 3] = 255;
+            return;
+        }
+
+        int a = PixelOps.Mul255((int)MathF.Round(Math.Clamp(sa, 0f, 255f)), coverage);
+        if (a == 0)
+        {
+            return;
+        }
+
+        int inv = 255 - a;
+        row[o] = (byte)Math.Min(255, PixelOps.Mul255((int)sr, coverage) + PixelOps.Mul255(row[o], inv));
+        row[o + 1] = (byte)Math.Min(255, PixelOps.Mul255((int)sg, coverage) + PixelOps.Mul255(row[o + 1], inv));
+        row[o + 2] = (byte)Math.Min(255, PixelOps.Mul255((int)sb, coverage) + PixelOps.Mul255(row[o + 2], inv));
+        row[o + 3] = (byte)Math.Min(255, a + PixelOps.Mul255(row[o + 3], inv));
+    }
+
+    /// <summary>预乘通道（0–255 的 float）→ 字节，与 <c>(int)value</c> 的截断语义一致。</summary>
+    private static byte ClampByte(float value)
+        => value <= 0f ? (byte)0 : value >= 255f ? (byte)255 : (byte)(int)value;
 
     /// <summary>
     /// 采样某个绝对像素的预乘颜色。子类只需回答「这个点落在渐变的哪个位置（0–1）」。
@@ -189,6 +338,13 @@ public abstract class GradientBrush : IBrush
     /// <param name="b">预乘蓝。</param>
     /// <param name="a">alpha（0–255）。</param>
     protected void SamplePremultiplied(int x, int y, float ditherOffset, out float r, out float g, out float b, out float a)
+    {
+        int segment = 0;
+        SampleColorAt(SampleParameter(x, y, ditherOffset), ref segment, out r, out g, out b, out a);
+    }
+
+    /// <summary>画布像素 → 夹到 0–1 的渐变参数（含逆变换与抖动）。</summary>
+    private float SampleParameter(int x, int y, float ditherOffset)
     {
         // 像素中心采样：+0.5 避免整像素边界上出现「半像素」偏差
         float sampleX = x + 0.5f;
@@ -203,41 +359,45 @@ public abstract class GradientBrush : IBrush
         }
 
         float t = ParameterAt(sampleX, sampleY) + (ditherOffset / 255f);
-        t = Math.Clamp(t, 0f, 1f);
+        return Math.Clamp(t, 0f, 1f);
+    }
 
-        int index = FindSegment(t);
-        if (index >= _stops.Length - 1)
+    /// <summary>
+    /// 把 0–1 的参数映射成预乘颜色。<paramref name="segment"/> 是跨像素复用的区间游标：
+    /// 参数单调前进时只做一次比较，径向渐变先减后增也能靠反向循环退回去。
+    /// </summary>
+    private void SampleColorAt(float t, ref int segment, out float r, out float g, out float b, out float a)
+    {
+        int last = _stops.Length - 1;
+
+        while (segment < last - 1 && t > _offsets[segment + 1])
         {
-            r = _stopsR[^1];
-            g = _stopsG[^1];
-            b = _stopsB[^1];
-            a = _stopsA[^1];
+            segment++;
+        }
+
+        while (segment > 0 && t < _offsets[segment])
+        {
+            segment--;
+        }
+
+        if (segment >= last)
+        {
+            r = _stopsR[last];
+            g = _stopsG[last];
+            b = _stopsB[last];
+            a = _stopsA[last];
             return;
         }
 
-        float from = _stops[index].Offset;
-        float to = _stops[index + 1].Offset;
-        float local = to > from ? (t - from) / (to - from) : 0f;
-
-        r = _stopsR[index] + ((_stopsR[index + 1] - _stopsR[index]) * local);
-        g = _stopsG[index] + ((_stopsG[index + 1] - _stopsG[index]) * local);
-        b = _stopsB[index] + ((_stopsB[index + 1] - _stopsB[index]) * local);
-        a = _stopsA[index] + ((_stopsA[index + 1] - _stopsA[index]) * local);
+        float local = (t - _segFrom[segment]) * _segInvSpan[segment];
+        r = _stopsR[segment] + (_segR[segment] * local);
+        g = _stopsG[segment] + (_segG[segment] * local);
+        b = _stopsB[segment] + (_segB[segment] * local);
+        a = _stopsA[segment] + (_segA[segment] * local);
     }
 
     /// <summary>点 (x, y) 在渐变轴上的归一化位置；可以超出 0–1，由采样端夹住。</summary>
     protected abstract float ParameterAt(float x, float y);
-
-    private int FindSegment(float t)
-    {
-        int i = 0;
-        while (i < _stops.Length - 2 && t > _stops[i + 1].Offset)
-        {
-            i++;
-        }
-
-        return i;
-    }
 
     private static float GetDitherOffset(int x, int y)
     {
@@ -278,6 +438,40 @@ public sealed class LinearGradientBrush : GradientBrush
         => _lengthSquared <= 1e-12f
             ? 1f
             : (((x - _fromX) * _dx) + ((y - _fromY) * _dy)) / _lengthSquared;
+
+    internal override bool TryCreateRowCursor(int x0, int y, out GradientRowCursor cursor)
+    {
+        if (_lengthSquared <= 1e-12f)
+        {
+            cursor = new GradientRowCursor { U = 1f };
+            return true;
+        }
+
+        float invLength = 1f / _lengthSquared;
+        float sx = x0 + 0.5f;
+        float sy = y + 0.5f;
+
+        // t 沿画布 x 方向是仿射的：t(x) = t0 + dt·(x - x0)。有逆矩阵时导数就是逆矩阵第一列。
+        float stepX = 1f;
+        float stepY = 0f;
+        float sampleX = sx;
+        float sampleY = sy;
+
+        if (HasInverseTransform)
+        {
+            Matrix3x2 m = InverseTransformMatrix;
+            stepX = m.M11;
+            stepY = m.M12;
+            sampleX = (sx * m.M11) + (sy * m.M21) + m.M31;
+            sampleY = (sx * m.M12) + (sy * m.M22) + m.M32;
+        }
+
+        float t0 = (((sampleX - _fromX) * _dx) + ((sampleY - _fromY) * _dy)) * invLength;
+        float dt = ((stepX * _dx) + (stepY * _dy)) * invLength;
+
+        cursor = new GradientRowCursor { U = t0, Du = dt };
+        return true;
+    }
 }
 
 /// <summary>
@@ -321,5 +515,44 @@ public sealed class RadialGradientBrush : GradientBrush
         float nx = (x - _centerX) / _radiusX;
         float ny = (y - _centerY) / _radiusY;
         return MathF.Sqrt((nx * nx) + (ny * ny));
+    }
+
+    internal override bool TryCreateRowCursor(int x0, int y, out GradientRowCursor cursor)
+    {
+        if (_radiusX <= 1e-6f || _radiusY <= 1e-6f)
+        {
+            cursor = new GradientRowCursor { U = 1f };
+            return true;
+        }
+
+        float sx = x0 + 0.5f;
+        float sy = y + 0.5f;
+        float ax = 1f / _radiusX;
+        float ay = 1f / _radiusY;
+
+        // nx、ny 沿画布 x 方向是仿射的 → q = nx² + ny² 是 x 的二次函数，用二阶差分推进（每像素一次开方）
+        // 没有逆矩阵时 ny 与 x 无关，所以 duy = 0（写成 ay 会把 q 的二次项算成两倍，圆心直接变黑）
+        float dux = ax;
+        float duy = 0f;
+        float nx = (sx - _centerX) * ax;
+        float ny = (sy - _centerY) * ay;
+
+        if (HasInverseTransform)
+        {
+            Matrix3x2 m = InverseTransformMatrix;
+            float sampleX = (sx * m.M11) + (sy * m.M21) + m.M31;
+            float sampleY = (sx * m.M12) + (sy * m.M22) + m.M32;
+            nx = (sampleX - _centerX) * ax;
+            ny = (sampleY - _centerY) * ay;
+            dux = m.M11 * ax;
+            duy = m.M12 * ay;
+        }
+
+        float a2 = (dux * dux) + (duy * duy);
+        float q0 = (nx * nx) + (ny * ny);
+        float dq = (2f * dux * nx) + (2f * duy * ny) + a2;
+
+        cursor = new GradientRowCursor { U = q0, Du = dq, Ddu = 2f * a2, SquareRoot = true };
+        return true;
     }
 }

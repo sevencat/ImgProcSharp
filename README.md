@@ -1,9 +1,10 @@
 # ImgProcSharp
 
-Drawing for [Sdcb.SimdCodecs](https://www.nuget.org/packages/Sdcb.SimdCodecs): read an image, draw shapes / gradients / strokes / TrueType text on it, write it back as PNG. Pure managed, no native dependency, AOT-compatible.
+Drawing for [Sdcb.SimdCodecs](https://www.nuget.org/packages/Sdcb.SimdCodecs): read an image, draw shapes / gradients / strokes / TrueType text on it, write it back as PNG or JPEG. Pure managed, no native dependency, AOT-compatible.
 
 ```csharp
 using ImgProcSharp;
+using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
 
 using var image = Image.Load("in.jpg");
@@ -14,10 +15,15 @@ image.Mutate(x => x
 // 图片来源信息顺带带出
 Console.WriteLine($"{image.SourceFormat} {image.Width}×{image.Height}, EXIF {image.Orientation}");
 
-// v1 不自带存图：直通像素 + 一行 PngWriter（Sdcb.SimdCodecs 自带，无需额外包）
+// v1 不自带存图：直通像素 + 一行编码器（都是 Sdcb.SimdCodecs 自带，无需额外包）
 byte[] straight = new byte[image.Width * image.Height * 4];
 image.Canvas.CopyToStraight(straight, image.Width * 4);
 File.WriteAllBytes("out.png", PngWriter.Encode(straight, image.Width, image.Height));
+
+// JPEG 同理：4 通道入参、alpha 被忽略，quality 1..100
+File.WriteAllBytes(
+    "out.jpg",
+    JpegEncoder.Encode(straight, image.Width, image.Height, 4, new JpegEncodeOptions { Quality = 92 }));
 ```
 
 ## Status
@@ -25,7 +31,7 @@ File.WriteAllBytes("out.png", PngWriter.Encode(straight, image.Width, image.Heig
 `0.1.0` — work in progress, API 尚未稳定。
 
 - 输入：`Sdcb.SimdCodecs` 1.4.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm）。
-- 输出：**本库不提供 `Save`**。需要 PNG 时直接用 `Sdcb.SimdCodecs.Png.PngWriter`（上面四行）；其他格式输出等 0.2（见 `plan.md` §Q）。
+- 输出：**本库不提供 `Save`**。PNG 用 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 用 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（都在 1.4.0 里，随元包传递引用）；其余格式（WebP 等）等 0.2（见 `plan.md` §Q）。
 - 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`）。
 - 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（Miter/Bevel/Round 连接、Butt/Round/Square 端点、`MiterLimit`、虚线）、`Matrix3x2` 变换（笔刷、线宽与虚线同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
 - 文字：内嵌文泉驿微米黑（2 MB gzip），无 kerning / 无 GSUB / 无双向文本 / 无彩色 emoji。
@@ -112,7 +118,9 @@ image.Mutate(x => x
 
 ```pwsh
 dotnet run --project samples/ImgProcSharp.Samples
-# → output/result.png（960×540：渐变背景、圆角卡片、中英文排版、裁剪条纹带、圆环描边、旋转徽章、描边文字、miter 尖角与虚线）
+# → output/result.png（960×540 矢量海报：渐变背景、圆角卡片、中英文排版、裁剪条纹带、圆环描边、旋转徽章、描边文字、miter 尖角与虚线）
+# → output/photo.jpg（1280×720 照片管线：JPEG 解码 → 渐变压暗 / 虚线高亮 / 信息卡 / 旋转徽章 → 编码回 JPEG）
+# → output/compare.png（原图与处理后左右拼一张对比图，2580×784）
 
 dotnet run -c Release --project benchmarks/ImgProcSharp.Benchmarks -- --filter "*Stroke*"
 # 填充/描边/文字/编解码/端到端；ShortRunJob，十几秒出数，正式数据加 --job default
@@ -122,14 +130,14 @@ dotnet publish samples/ImgProcSharp.AotSmoke -c Release -r win-x64
 # 两者的输出必须逐字节一致（打印确定性哈希；win-x64 自包含约 9.8 MB）
 ```
 
-示例不依赖任何素材文件，跑完直接看图；它同时是「裁剪 + 变换 + 描边 + 文字」四条能力的端到端冒烟。AOT smoke 是发布形态的冒烟，基准只是「别把数量级搞错」的工具，都不进 CI 门禁。
+示例不依赖任何素材文件：海报是纯矢量拼的，照片那张现场合成后编码成 JPEG 再解码回来（放一张 `samples/assets/sample.jpg` 就会优先用它），跑完直接看图；它同时是「解码 + 裁剪 + 变换 + 描边 + 文字 + 编码」的端到端冒烟。AOT smoke 是发布形态的冒烟，基准只是「别把数量级搞错」的工具，都不进 CI 门禁。
 
 ## Layout
 
 ```
 src/ImgProcSharp.Core/               绘图核心（net8.0;net10.0，不发布）
 src/ImgProcSharp.SimdCodecs/         唯一打包工程（net10.0，程序集名 ImgProcSharp）
-samples/ImgProcSharp.Samples/        示例控制台（net10.0，输出 output/result.png）
+samples/ImgProcSharp.Samples/        示例控制台（net10.0，输出 result.png / photo.jpg / compare.png）
 samples/ImgProcSharp.AotSmoke/       NativeAOT 冒烟（PublishAot，输出与 JIT 一致）
 benchmarks/ImgProcSharp.Benchmarks/  BenchmarkDotNet 基准
 tests/                               Core.Tests（net8.0;net10.0）+ SimdCodecs.Tests（net10.0）

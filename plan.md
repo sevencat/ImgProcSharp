@@ -2,7 +2,7 @@
 
 目标：给 `Sdcb.SimdCodecs` 补一个「画」的能力——读一张图，在图上画形状、渐变、文字，再存成另一张图。字体渲染直接采用 `F:\code\zlmsharp\src\GlyphRaster` 的代码；绘图核心不依赖任何编解码库，编解码只由外层薄门面负责。
 
-**输入**用 `Sdcb.SimdCodecs`（NuGet 1.4.0，PNG/JPEG/WebP/GIF/BMP/TIFF/QOI/Netpbm 全能解）。**v1 不提供存图 API**：1.4.0 自带 `Sdcb.SimdCodecs.Png.PngWriter`（公开、随元包传递引用），需要输出时由调用方直接调它，本库不重复造编码器，也不把编码器放进公开 API。
+**输入**用 `Sdcb.SimdCodecs`（NuGet 1.4.0，PNG/JPEG/WebP/GIF/BMP/TIFF/QOI/Netpbm 全能解）。**v1 不提供存图 API**：1.4.0 自带 `Sdcb.SimdCodecs.Png.PngWriter` 与 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（公开、随元包传递引用），需要输出时由调用方直接调，本库不重复造编码器，也不把编码器放进公开 API。
 
 决策、许可、算法笔记、未决问题等统统在 [`misc.md`](misc.md)，本文只放计划本身。
 
@@ -19,7 +19,7 @@
 
 ### 非目标（v1 明确不做）
 
-- **输出编码**：v1 的公开 API 里没有 `Save`/`EncodePng`。PNG 由调用方直接调 `Sdcb.SimdCodecs.Png.PngWriter`；JPEG/WebP 等输出等 0.2 再议（misc §Q）。
+- **输出编码**：v1 的公开 API 里没有 `Save`/`EncodePng`。PNG 调 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 调 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（两者都在 1.4.0 里）；WebP 等其他输出等 0.2 再议（misc §Q）。
 - 色彩管理：不做 ICC/primaries 转换，解码按「display tier」8 位 RGBA 直接画（见 misc §K）。
 - 文字的复杂排版：无 kerning、无 GSUB/整形、无双向文本、无彩色 emoji（GlyphRaster 现状，见 misc §I）。
 - 动画/多帧编辑：只处理首帧。
@@ -34,7 +34,7 @@
 |---|---|
 | `ImgProcSharp`（NuGet，net10.0） | 唯一对外发布的包。内含绘图核心源码 + GlyphRaster 源码 + 内嵌字体 + 解码桥；`Sdcb.SimdCodecs` 只用于解码，编码不进包 |
 | `ImgProcSharp.Core`（net8.0;net10.0） | 开发与测试用工程，`IsPackable=false`，不单独发布（方案 A） |
-| `samples/ImgProcSharp.Samples` | 控制台示例：读 `samples/assets/sample.jpg`，画文字/标注框/渐变角标，输出 `output/result.png` |
+| `samples/ImgProcSharp.Samples` | 控制台示例：矢量海报 → `output/result.png`；照片管线（JPEG 解码 → 标注 → 编码）→ `output/photo.jpg` + 原图/成品对比拼图 `output/compare.png` |
 | `tests/ImgProcSharp.Core.Tests`（net8+net10） | 几何、光栅化、混合、文字 |
 | `tests/ImgProcSharp.SimdCodecs.Tests`（net10） | 端到端解码 → 绘制：像素保真、格式识别、Exif 方向、链式 `Mutate`（PNG 素材用 `PngWriter` 现造） |
 
@@ -78,13 +78,13 @@ f:/code/ImgProcSharp/
     ImgProcSharp.Core.Tests/       # net8.0;net10.0，内核与算法
     ImgProcSharp.SimdCodecs.Tests/ # net10.0，端到端（M4 起）
   samples/
-    ImgProcSharp.Samples/          # net10.0 示例，输出 output/result.png
+    ImgProcSharp.Samples/          # net10.0 示例，输出 result.png + photo.jpg + compare.png
     ImgProcSharp.AotSmoke/         # net10.0 + PublishAot，输出必须与 JIT 逐字节一致
   benchmarks/
     ImgProcSharp.Benchmarks/       # BenchmarkDotNet（填充/描边/文字/编解码）
 ```
 
-已完成（截至 M7，Core 195 个用例 ×2 目标框架 + ext 16 个用例，全绿）：
+已完成（截至 M7 + 0.2 渐变优化，Core 199 个用例 ×2 目标框架 + ext 16 个用例，全绿）：
 
 ```
 src/ImgProcSharp.Core/Colors/Color.cs                    预乘/直通、Blend、Div255
@@ -113,7 +113,7 @@ tests/ImgProcSharp.Core.Tests/StrokeStyleTests.cs         连接/端帽/MiterLim
 tests/ImgProcSharp.Core.Tests/ClipTests.cs                裁剪掩码（嵌套/描边/文字/AA/变换）
 tests/ImgProcSharp.Core.Tests/BrushTransformTests.cs       渐变/图案笔刷跟随变换
 tests/ImgProcSharp.SimdCodecs.Tests/ImageTests.cs         解码保真/方向/链式/Mutate 绘制与裁剪
-samples/ImgProcSharp.Samples/Program.cs                  渐变+卡片+中文+裁剪条纹+描边+旋转+尖角+虚线，输出 result.png
+samples/ImgProcSharp.Samples/Program.cs                  海报（渐变+卡片+裁剪条纹+描边+旋转+尖角+虚线）+ 照片管线（JPEG 编解码）
 samples/ImgProcSharp.AotSmoke/Program.cs                   AOT 冒烟：裁剪+变换+文字+PNG 往返，打印确定性哈希
 benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/文字/编解码/端到端
 ```
@@ -216,7 +216,13 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 </Project>
 ```
 
-`Program.cs` 不依赖任何素材文件：整张图由代码画出来（渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线），最后用 `PngWriter` 写到 `output/result.png`。`dotnet run --project samples/ImgProcSharp.Samples` 一条命令即可复现，肉眼就能验 AA、渐变脏边、中文缺字、描边接缝、miter 尖角与虚线、旋转文字锯齿、裁剪边界。
+`Program.cs` 不依赖任何素材文件，跑两条流水线：
+
+1. `RenderPoster()`——整张图由代码画出来（渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线），`PngWriter` 写到 `output/result.png`。
+2. `RenderPhoto()`——`BuildSamplePhoto()` 合成一张 1280×720 的照片并用 `JpegEncoder` 编码成真 JPEG 字节（存在 `samples/assets/sample.jpg` 时优先读它），`Image.Load` 解码 → 顶部压暗渐变 / 虚线高亮 / 引线 / 信息卡 / 旋转徽章 / 暗角 → `Canvas.CopyToStraight` 后 `JpegEncoder.Encode` 写 `output/photo.jpg`。
+3. `RenderComparison()`——解码后先 `Image.Clone()` 留一份原图，处理完用 `Canvas.GetRow` 把两张图逐行拷进一张 2580×784 的拼图（顶部标签条 + 中间分隔线 + 外框，行内预乘像素直接搬），`PngWriter` 写 `output/compare.png`，一眼就能看出哪些是画上去的。
+
+`dotnet run --project samples/ImgProcSharp.Samples` 一条命令即可复现，肉眼就能验 AA、渐变脏边、中文缺字、描边接缝、miter 尖角与虚线、旋转文字锯齿、裁剪边界，以及「解码 → 绘制 → 编码」整条链。
 
 另外两个同级工程：`samples/ImgProcSharp.AotSmoke`（`PublishAot=true`，打印确定性哈希，JIT 与 AOT 必须逐字节一致）与 `benchmarks/ImgProcSharp.Benchmarks`（BenchmarkDotNet，`--filter`/`--job` 照常）。
 
@@ -235,8 +241,9 @@ image.Mutate(x => x.Resize(...).Fill(brush, path).DrawText(options, text, at))  
   └─ DrawingContext: clip → 路径 flatten → ScanlineRasterizer → A8 coverage
   └─ brush 采样 + coverage 混合（按行，标量 + SIMD）
 
-Canvas → PNG（调用方/测试侧，不在本库 API 里）
+Canvas → PNG/JPEG（调用方/测试侧，不在本库 API 里）
   └─ Canvas.CopyToStraight → PngWriter.Encode(straight, w, h)
+                            / JpegEncoder.Encode(straight, w, h, 4, options)
 ```
 
 ---
@@ -427,6 +434,7 @@ public sealed class PatternBrush(Canvas tile, PointF origin) : IBrush;   // 平�
 - 可选 4×4 ordered dither（`Dither = true`）抑制色带：在「像素中心参数」上加 `(bayer - 7.5) / 255`，只影响颜色通道，不改变 alpha。
 - `PatternBrush` 按取模环绕平铺；瓦片全不透明且同色时才报告纯色（预乘瓦片反预乘会丢精度，半透明一律走逐像素）。
 - 渐变/图案坐标是画布像素坐标，**默认不随 `DrawingContext.Transform` 旋转缩放**（构造笔刷时的坐标系）；`Fill` 会把画布坐标按 `Matrix3x2.Invert(Transform)` 映射回用户空间再采样（M7），因此同一个笔刷实例在不同变换下会得到不同采样相位，而笔刷对象本身不被改写。自定义 `GradientBrush` 派生类默认「不跟随」（`WithInverseTransform` 返回自身）。
+- 性能：内置渐变按行建「参数游标」（`U`/`Du`/`Ddu`），线性渐变一阶差分、径向渐变二阶差分，跟随变换时导数取逆矩阵第一列——热循环里没有点积、除法与矩阵乘。`TryCreateRowCursor` 是 `internal virtual`，默认 `false`，外部派生类仍走逐像素 `ParameterAt`；快慢两条路径共用 `BlendPixel`，结果逐字节一致（misc §AA）。
 
 ### 6.6 描边
 
@@ -633,7 +641,7 @@ image.Mutate(x => x
 - 解码（`ImageDecoderBridge.cs`，唯一接触 SimdCodecs 的文件）：
   `SimdCodecs.TryReadInfo` 取 `Format`/`Orientation`/尺寸 → `SimdCodecs.TryDecode` → `dec.ToRgba8()`（4 通道 RGBA8、紧密排列）→ 逐行 `PixelOps.PremultiplyInPlace` 写进 `Canvas`。
   两次调用各扫一遍文件头，代价可忽略；比 2.0 的 `ImageDecoder.Open + CopyPixels` 多一次整图拷贝（12 MP 约 5–10 ms），v1 接受；升级点见 misc §B。
-- 编码：公开 API 里没有。需要 PNG 时直接 `PngWriter.Encode(straight, w, h)`（直通缓冲用 `Canvas.CopyToStraight` 拿），一行代码；这样发布的 dll 里没有 zlib/CRC/滤波，也不用背编码器的兼容性责任。用法见 misc §Q。
+- 编码：公开 API 里没有。PNG 直接 `PngWriter.Encode(straight, w, h)`、JPEG 直接 `JpegEncoder.Encode(straight, w, h, 4, options)`（直通缓冲用 `Canvas.CopyToStraight` 拿），各一行代码；这样发布的 dll 里没有 zlib/CRC/DCT，也不用背编码器的兼容性责任。用法见 misc §Q。
 - 方向：1.4.0 的 `TryReadInfo` 已给出 `ImageInfo.Orientation`，不必自己解析 EXIF APP1。`ApplyOrientation()` 应用后把 `Orientation` 归位 `Normal`，因此重复调用无副作用（幂等，有测试）。
 - `Mutate` 的 `Resize` 会**替换并释放**旧画布，并把同一个 `DrawingContext` 重绑到新画布（`Transform` 保留）；其它方法只是薄封装，不引入额外状态。
 
@@ -659,7 +667,7 @@ image.Mutate(x => x
 
 顺序依赖：M0 → M1 → M2 → M3 → M4 → M5 为关键路径；M6、M7 依赖 M2，可并行或后置。
 
-进度：**M0、M1、M1.5、M2、M3、M4、M5、M6、M7 全部完成**（Core 195 个用例在 net8.0 / net10.0 上全绿，ext 16 个用例在 net10.0 上全绿，`dotnet build` 0 警告，示例产出 960×540 PNG，AOT 发布产物与 JIT 输出逐字节一致）。M2 已落地：几何与路径模型（`IPath`/`Path`/`PathBuilder`/展平/五种图元）、SVG 端点弧 `ArcTo`、`RoundRectanglePolygon`、`ScanlineRasterizer`（4× 子采样 + 横向精确覆盖，NonZero/EvenOdd）、`CoverageBuffer`、`RectangleFill` 快路径、`DrawingContext.Fill`，以及 M2 后段的四种笔刷（`SolidBrush`/`LinearGradientBrush`/`RadialGradientBrush`/`PatternBrush`，渐变预乘插值 + 可选 ordered dither）。M3 已落地：GlyphRaster 引擎拷入（`internal`）、`TextFont` 门面、`TextOptions`/`TextAlign`、`DrawText` 快路径、`FillText` 轮廓慢路径、`GlyphPathBridge`、`MeasureText`、折行与对齐。M4 已落地：`Image` 门面（`Load`/`Create`/`Mutate`/`Clone`/`ApplyOrientation`）、`ImageDecoderBridge`（`TryReadInfo` + `TryDecode` + 逐行预乘）、`IImageProcessingContext` 链式糖、端到端测试（PNG 素材现造）。**公开 API 不含编码**：`PngWriter` 由调用方直接用（测试即如此）。M5 已落地：`IPen`/`Pen`、`StrokeOutline`（线段四边形 ∪ 顶点圆盘，统一绕向走 NonZero 并集）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`TextDrawing.GetTextPath`、`DrawText` 在非恒等变换下自动改走轮廓路径、samples 示例工程（无素材依赖，`PngWriter` 输出 `output/result.png`）。M7 已落地：`PushClip`/`PopClip`（画布大小 A8 掩码栈，填充/描边/文字三条路径统一走 `BlendCoverage`）、渐变与图案笔刷跟随变换（逆矩阵采样 + 不可变副本）、BenchmarkDotNet 基准工程（填充/描边/文字/编解码/端到端）、NativeAOT smoke 工程（`PublishAot`，win-x64 自包含 9.8 MB，输出哈希与 JIT 一致）。M6 已落地：`LineJoin`（Miter/Bevel/Round）与 `LineCap`（Butt/Round/Square）、`MiterLimit` 超限退回 bevel、`DashPattern`/`DashOffset`（线宽倍数，闭合路径跨起点合并，整圈实线退化为闭合描边），样式通过 `IPen` 默认成员保持向后兼容。剩余：0.2 的混合模式与图层。M0 实际未做 CI（仓库尚无远端），其余按计划落地。
+进度：**M0、M1、M1.5、M2、M3、M4、M5、M6、M7 全部完成**（Core 199 个用例在 net8.0 / net10.0 上全绿，ext 16 个用例在 net10.0 上全绿，`dotnet build` 0 警告，示例产出 960×540 PNG 与 1280×720 JPEG，AOT 发布产物与 JIT 输出逐字节一致）。M2 已落地：几何与路径模型（`IPath`/`Path`/`PathBuilder`/展平/五种图元）、SVG 端点弧 `ArcTo`、`RoundRectanglePolygon`、`ScanlineRasterizer`（4× 子采样 + 横向精确覆盖，NonZero/EvenOdd）、`CoverageBuffer`、`RectangleFill` 快路径、`DrawingContext.Fill`，以及 M2 后段的四种笔刷（`SolidBrush`/`LinearGradientBrush`/`RadialGradientBrush`/`PatternBrush`，渐变预乘插值 + 可选 ordered dither）。M3 已落地：GlyphRaster 引擎拷入（`internal`）、`TextFont` 门面、`TextOptions`/`TextAlign`、`DrawText` 快路径、`FillText` 轮廓慢路径、`GlyphPathBridge`、`MeasureText`、折行与对齐。M4 已落地：`Image` 门面（`Load`/`Create`/`Mutate`/`Clone`/`ApplyOrientation`）、`ImageDecoderBridge`（`TryReadInfo` + `TryDecode` + 逐行预乘）、`IImageProcessingContext` 链式糖、端到端测试（PNG 素材现造）。**公开 API 不含编码**：`PngWriter` 由调用方直接用（测试即如此）。M5 已落地：`IPen`/`Pen`、`StrokeOutline`（线段四边形 ∪ 顶点圆盘，统一绕向走 NonZero 并集）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`TextDrawing.GetTextPath`、`DrawText` 在非恒等变换下自动改走轮廓路径、samples 示例工程（无素材依赖，`PngWriter` 输出 `output/result.png`）。M7 已落地：`PushClip`/`PopClip`（画布大小 A8 掩码栈，填充/描边/文字三条路径统一走 `BlendCoverage`）、渐变与图案笔刷跟随变换（逆矩阵采样 + 不可变副本）、BenchmarkDotNet 基准工程（填充/描边/文字/编解码/端到端）、NativeAOT smoke 工程（`PublishAot`，win-x64 自包含 9.8 MB，输出哈希与 JIT 一致）。M6 已落地：`LineJoin`（Miter/Bevel/Round）与 `LineCap`（Butt/Round/Square）、`MiterLimit` 超限退回 bevel、`DashPattern`/`DashOffset`（线宽倍数，闭合路径跨起点合并，整圈实线退化为闭合描边），样式通过 `IPen` 默认成员保持向后兼容。0.2 已落地第一项优化：渐变按行预计算参数游标（`GradientRowCursor`，线性渐变一阶差分、径向渐变二阶差分，跟随变换时导数取逆矩阵第一列，热循环里没有点积与除法；外部派生类仍走逐像素慢路径，两条路径共用一个 `BlendPixel`），渐变矩形 13.3 ms → 8.6 ms（纯色 10.9 倍 → 7.1 倍），另加圆心对称性、旋转椭圆渐变、外部派生类兜底、快慢路径 ≤1 LSB 对照四个用例（199 = 195 + 4）。剩余：0.2 的混合模式与图层。M0 实际未做 CI（仓库尚无远端），其余按计划落地。
 
 ---
 
@@ -667,7 +675,8 @@ image.Mutate(x => x
 
 **功能**
 
-- `dotnet run --project samples/ImgProcSharp.Samples` 生成 `output/result.png`（用 `PngWriter` 写出）：渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线，肉眼可验，无错误像素。
+- `dotnet run --project samples/ImgProcSharp.Samples` 生成 `output/result.png`（`PngWriter`）：渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线，肉眼可验，无错误像素。
+- 同一条命令生成 `output/photo.jpg` 与 `output/compare.png`：`JpegEncoder` 造出真 JPEG 素材 → `Image.Load` 解码 → 叠加渐变/虚线/文字/旋转徽章 → `JpegEncoder.Encode` 写回，并把原图与成品左右拼成一张对比图，证明「解码 → 绘制 → 编码」闭环可用。
 - `Image.Load("x.png").Mutate(x => x.Resize(...).Fill(...).Draw(...).DrawText(...))` 跑通，`Image.Clone()` 出来的图画布互不影响。
 - **解码保真**：`PngWriter` 写出的 PNG 经 `Image.Load` 回到 `Canvas`，与原始像素逐通道相差 ≤ 1（直通→预乘→直通在 `a<255` 时的量化误差），全不透明时逐字节相同。
 - **方向**：带 EXIF 方向的图 `Orientation` 与文件一致；`ApplyOrientation()` 后画布按 `dst(dx,dy) = src(dy, H-1-dx)`（90° CW）等规则转正，再次调用不改变像素。
@@ -709,8 +718,8 @@ image.Mutate(x => x
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 只能引 `Sdcb.SimdCodecs` 1.4.0（2.0 未发版） | 升级窗口受限 | 解码只经 `ImageDecoderBridge.cs`；编码依赖它自带的 `PngWriter`（1.4.0 已公开），不自研。2.0 发版后只改一个文件。见 misc §B / §Q |
-| 调用方拿不到「一键存图」 | 需要多写两行 | `Canvas.CopyToStraight` + `PngWriter.Encode` 就是四行；v1 明确不承诺输出编码，避免为多格式输出背兼容责任 |
+| 只能引 `Sdcb.SimdCodecs` 1.4.0（2.0 未发版） | 升级窗口受限 | 解码只经 `ImageDecoderBridge.cs`；编码依赖它自带的 `PngWriter`/`JpegEncoder`（1.4.0 均已公开），不自研。2.0 发版后只改一个文件。见 misc §B / §Q |
+| 调用方拿不到「一键存图」 | 需要多写两行 | `Canvas.CopyToStraight` + `PngWriter.Encode`（或 `JpegEncoder.Encode`）就是四行；v1 明确不承诺输出编码，避免为多格式输出背兼容责任 |
 | 预乘 vs 直通 alpha 决策 | 影响所有混合内核与边界代码 | 已在 §6.1 定为预乘，M0 定稿后不再改 |
 | GlyphRaster 只有二次贝塞尔、整数笔位 | 旋转/缩放文字必须走路径慢路径 | 慢路径在 M3 就实现（`GetTextPaths` 已具备） |
 | 描边的工作量易失控（join/dash/自交/退化） | 排期风险 | 先用「圆头端点 + 圆角连接」打通（`StrokeOutline`），M6 再补 Miter/Bevel/Square/Dash；实际落地时几何部分只多出「外侧法向 + 闭式 miter 交点」和「按弧长切段」两块，没有引入新的光栅化路径 |

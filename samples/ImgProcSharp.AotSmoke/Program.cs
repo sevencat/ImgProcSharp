@@ -8,7 +8,8 @@ using Sdcb.SimdCodecs.Png;
 //   dotnet publish samples/ImgProcSharp.AotSmoke -c Release -r win-x64
 //   ./samples/ImgProcSharp.AotSmoke/bin/Release/net10.0/win-x64/publish/ImgProcSharp.AotSmoke.exe
 // 参考输出（JIT 与 NativeAOT 逐字节一致；任何一位不同都说明光栅化或内嵌字体在裁剪/AOT 下行为变了）：
-//   dims=320x200 png=10403 render=0D1AD94271F2DAE8 decode=0D1AD94271F2DAE8 ink=54828
+//   dims=320x200 png=10413 render=C763804986BB6615 decode=C763804986BB6615 ink=54828
+// （0.2 的渐变行游标优化之后的值；差分累计与逐像素重算最多差 1 LSB，见 misc §AA）
 // 实测 win-x64 自包含 exe 约 9.8 MB（内嵌字体是主要体积来源）。
 
 using Image image = Image.Create(320, 200, Color.White);
