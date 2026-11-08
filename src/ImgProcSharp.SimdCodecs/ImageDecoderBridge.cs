@@ -24,17 +24,55 @@ internal static class ImageDecoderBridge
             throw new InvalidDataException($"解码失败：{info.Format} {info.Width}×{info.Height}。");
         }
 
-        Canvas canvas = Canvas.Create(decoded.Width, decoded.Height);
-        ReadOnlySpan<byte> straight = decoded.ToRgba8();
-        int rowBytes = decoded.Width * Canvas.BytesPerPixel;
+        using IDisposable? decodedLifetime = decoded as IDisposable;
 
-        for (int y = 0; y < decoded.Height; y++)
+        Canvas canvas = Canvas.Create(decoded.Width, decoded.Height);
+        try
         {
-            Span<byte> row = canvas.GetRow(y);
-            straight.Slice(y * rowBytes, rowBytes).CopyTo(row);
-            PixelOps.PremultiplyInPlace(row);
+            if (!ConvertIntoCanvas(decoded, canvas))
+            {
+                throw new InvalidDataException($"解码失败：{info.Format} {info.Width}×{info.Height} 的像素无法投影为 8 位 RGBA。");
+            }
+
+            for (int y = 0; y < canvas.Height; y++)
+            {
+                PixelOps.PremultiplyInPlace(canvas.GetRow(y));
+            }
+        }
+        catch
+        {
+            canvas.Dispose();
+            throw;
         }
 
         return new Image(canvas, info.Format, decoded.IccProfile.ToArray(), info.Orientation);
+    }
+
+    /// <summary>
+    /// 把解码结果逐行转换进画布缓冲（<paramref name="canvas"/> 的行即目标行）。
+    /// 这条路径不再分配整幅 RGBA8 临时数组：1080p 直接省掉 8.3 MB。
+    /// </summary>
+    private static bool ConvertIntoCanvas(IDecodedImage decoded, Canvas canvas)
+    {
+        // float32 没有默认的 8 位投影（PixelConverter.TryConvert 会拒绝），
+        // 退回 ToRgba8 的码值投影，保持 v1 的既有行为。
+        if (decoded.SampleFormat == SampleFormat.Float32)
+        {
+            ReadOnlySpan<byte> straight = decoded.ToRgba8();
+            int rowBytes = canvas.Width * Canvas.BytesPerPixel;
+
+            for (int y = 0; y < canvas.Height; y++)
+            {
+                straight.Slice(y * rowBytes, rowBytes).CopyTo(canvas.GetRow(y));
+            }
+
+            return true;
+        }
+
+        return PixelConverter.TryConvert(
+            decoded,
+            canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height),
+            canvas.Stride,
+            ImagePixelFormat.Rgba32);
     }
 }

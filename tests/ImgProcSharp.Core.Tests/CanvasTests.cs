@@ -211,6 +211,27 @@ public class CanvasTests
     }
 
     [Fact]
+    public void CopyToStraightBulkPathMatchesRowByRowPath()
+    {
+        using Canvas canvas = Canvas.Create(3, 2);
+        canvas.SetColor(0, 0, new Color(200, 100, 50, 128));
+        canvas.SetColor(2, 1, new Color(10, 20, 30, 255));
+
+        // stride == Stride 走整块内核，stride 更大走逐行，两者必须逐字节相同
+        var tight = new byte[24];
+        var padded = new byte[(12 + 8) * 2];
+        canvas.CopyToStraight(tight, 12);
+        canvas.CopyToStraight(padded, 20);
+
+        for (int y = 0; y < canvas.Height; y++)
+        {
+            Assert.Equal(
+                tight.AsSpan(y * 12, 12).ToArray(),
+                padded.AsSpan(y * 20, 12).ToArray());
+        }
+    }
+
+    [Fact]
     public void CopyToStraightRejectsSmallDestination()
     {
         using Canvas canvas = Canvas.Create(2, 2);

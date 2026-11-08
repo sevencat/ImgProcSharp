@@ -737,3 +737,65 @@ image.Mutate(x => x
 3. 包内检查：`unzip -l` 看文件清单（dll 1 个、无 `Core.dll`、无 `Sdcb.SimdCodecs.dll`），字体许可在 `licenses/`。
 4. README 写明：net10 限定、字体大小、无色彩管理、字体许可。
 5. 打完包用 `dotnet package` 在独立空项目里做一次真实 `PackageReference` 验证（防止源码内嵌漏文件）。
+
+---
+
+## 12. 性能优化记录
+
+### 12.1 测量口径
+
+- 绝对值噪声很大：同一段标量 `PremultiplyInPlace` 在两轮 `Stopwatch` 测量里分别得到 4.7 ms 与 38.7 ms（8×），判断是 CPU 核心调度与 JIT 分层所致。**只信同一次运行内的相对对比**，正式数据走 `BenchmarkDotNet` 的 `--job default`，不用 `ShortRunJob` 的单轮结果下结论。
+- 下表是 1920×1080（200 万像素）本机实测，仅用于横向比较。
+
+| 操作 | 耗时 | 每像素 | 备注 |
+|---|---|---|---|
+| `PremultiplyInPlace`（标量） | 38.7 ms | 18.7 ns | 解码路径 |
+| `PremultiplyInPlace`（`Vector128` 原型） | 9.5 ms | 4.8 ns | 4×，逐字节相同 |
+| `CopyToStraight` | 5.6 ms | 2.7 ns | 每像素 3 次整数除法 |
+| `Unpremultiply(src,dst)` | 10.6 ms | 5.1 ns | 同上，多一次缓冲 |
+| `IsFullyOpaque` | 0.93 ms | 0.45 ns | 逐字节扫描 |
+| `FlipHorizontal` | 0.96 ms | 0.48 ns | 逐像素 4 字节交换 |
+| `Rotate90` | 7.0 ms | 3.4 ns | 逐像素 4 字节搬移 |
+| `Canvas.Clear` | 0.50 ms | 0.24 ns | `uint` 广播填充，接近带宽极限 |
+| `Fill` 纯色矩形全覆盖（优化前） | 5.15 ms | 2.5 ns | 比 `Clear` 慢 10× |
+| `Fill` 线性渐变全覆盖 | 35.2 ms | 17 ns | 当前最大热点 |
+
+同一进程内的 A/B（预热 1 轮 + 7 轮中位数，可靠性远高于上表）：
+
+| 操作 | 耗时 | 每像素 | 对比 |
+|---|---|---|---|
+| `Fill` 不透明纯色整幅矩形 | 1.03 ms | 0.5 ns | 直写路径，接近 `Clear` |
+| `Fill` 半透明纯色整幅矩形 | 25.3 ms | 12.6 ns | 仍走 `RowBlender`，当前最大热点 |
+| `PremultiplyInPlace`（标量） | 4.66 ms | 2.3 ns | 参照 |
+| `PremultiplyInPlace`（SIMD） | 1.04 ms | 0.5 ns | 4.5× |
+| `CopyToStraight`（整块 vs 逐行） | 10.80 ms | 0.5 ns | 26.8 → 10.8 ms（2.5×），alpha=180 数据 |
+| `CopyToPremultiplied`（整块） | 0.30 ms | 0.15 ns | 纯 memcpy |
+| `Image.Load` PNG 1080p（直写 vs `ToRgba8`） | 19.7 ms | — | 22.6 → 19.7 ms，峰值少 8.3 MB |
+
+### 12.2 已落地
+
+1. **`RowBlender` 的 coverage 装载**：`Vector128.Create(coverage[i], …)` 每 4 像素生成 16 条标量插入（`pinsrb`），比后面的算术还贵；改为 `Vector128.LoadUnsafe` 一次拖 16 字节。尾部不足 16 像素时仍按 4 像素一组走向量（`Create` 只读到 `coverage[i + 3]`，不越界），只剩 0–3 像素走标量，窄行不会退化。语义不变，逐字节对拍由 `RowBlenderSimdTests`（1/2/3/7/8/33/100 像素）守住。
+2. **不透明纯色全覆盖直写**：`color.A == 255` 且整行 coverage 全 255 时，source-over 在数学上就是 `dst = src`，于是跳过 `Mul255` 走 `Fill`。实测 1080p 整幅不透明填充 5.15 ms 量级 → **1.03 ms**（同进程 A/B，作为对照的半透明同色是 25.3 ms）。顺带修正 misc §U 的旧结论「1.6 ns/px 已到带宽极限」：`Clear` 能到 0.24 ns/px，纯色填充仍有空间。对拍测试 `OpaqueRectangleFastPathMatchesGenericPath` 覆盖整图/内缩/小数边界/负坐标四种矩形。
+3. **`PremultiplyInPlace` SIMD 化**：每轮 4 像素，字节加宽到 ushort、alpha 广播到 RGBA、定点除 255、`ConditionalSelect` 还原 alpha、`Narrow` 回字节；非原地的 `Premultiply(src, dst)` 共用同一内核。`a == 255` 不再需要分支（定点结果天然等于原值），尾部走标量。实测 1080p 全图 **4.66 ms → 1.04 ms（4.5×）**；`PremultiplyInPlaceMatchesScalarReference`（1/3/4/5/20/1000 像素）与 `PremultiplyIntoDestinationMatchesInPlace` 守住逐字节一致。
+4. **解码直写画布**：`decoded.ToRgba8()` 每次都分配一整幅 `W*H*4`（1080p 8.3 MB，直接进 LOH）再整图拷进画布。改为 `PixelConverter.TryConvert(decoded, canvas.Buffer, canvas.Stride, ImagePixelFormat.Rgba32)` 逐行转换直接落进画布缓冲；`SampleFormat.Float32` 没有默认的 8 位投影，保留 `ToRgba8` 回退。`decoded` 用 `using IDisposable?` 收口（当前未指定 pool 时可空，换成池化实现后不会泄漏）。实测 1080p PNG 加载 22.6 → 19.7 ms（PNG 解压占大头），峰值少 8.3 MB。`PixelConverterParityTests` 对 1/2/3/4 通道 × UInt8/UInt16 与 `ToRgba8()` 逐字节对拍，并验证 stride 填充不被写脏。
+5. **导出整块化**：`CopyToStraight` / `CopyToPremultiplied` 在 `destinationStride == Stride` 时一次整块进内核。根因不是除法，而是逐行调用让内核的小循环反复重新进入（1080p 1080 次），实测**半透明导出 26.8 → 10.8 ms（2.5×）**，`CopyToPremultiplied` 0.30 ms。带行填充时仍走逐行路径，`CopyToStraightBulkPathMatchesRowByRowPath` 对拍两条路径。
+
+### 12.3 待评估（按性价比排序）
+
+| 项 | 现状 | 方案 | 预估 |
+|---|---|---|---|
+| ~~`Unpremultiply` 查表~~ | 已实测否决 | 256×256 `byte` 表（64 KB）替掉每像素 3 次 `idiv` | **负优化**：27.5 vs 10.8 ms；瓶颈不是除法，而是逐行重新进入内核（已由整块调用解决） |
+| `Rotate90` / `FlipHorizontal` | 逐像素 4 字节 | 4×4 块 `Vector128` 转置 / 字节逆序 shuffle | 2–3× |
+| `PatternBrush.Blend` | 每像素 `Mod`（`idiv`） | 按 tile 剩余宽度分段步进，段内索引自增 | 5–10× |
+| 半透明纯色 / 任意覆盖率填充 | 12.6 ns/px | `OverSolid` 每像素 4 次 `Div255`；可对 `sa == 255` 特化（`inverse = 255 - c`）并预乘 `srcPx` | 2–3× |
+| ~~解码入口 `ToRgba8()`~~ | 已落地（见 §12.2-4） | 换 `TryDecodeInto` 会丢掉 `IccProfile`（只有 `IDecodedImage` 带），故改用 `PixelConverter.TryConvert` 逐行直写 | 省 8.3 MB 分配 + 一次整图拷贝 |
+| 渐变混合内核 | 17 ns/px | 2 停特化、覆盖 255 且不透明时跳过 `BlendPixel`、沿 x 颜色增量 | 2–3× |
+| `Resizer` | 中间 float 全图缓冲（4K 近 200 MB） | 按 y 分块 + 两趟 SIMD | 内存优先，速度 2–4× |
+| `ScanlineRasterizer` | 每子扫描线排序 + 浮点累加 | 定点覆盖 + AET 增量排序 | 中等，改动面大 |
+
+### 12.4 明确不做
+
+- `Canvas.GetRow` 去掉边界检查：每行几纳秒，1080 行不到 5 µs。
+- 全面升级 `Vector256`：混合内核 4→8 像素/轮约 1.5×，代码量与回退路径翻倍。
+- 字体/字形相关路径（`TextDrawing`、`GlyphRaster`、`TextFont`）暂不优化。
+- 影响像素结果的改写：所有 SIMD 版本必须与标量逐字节相同，否则 AOT 参考哈希（misc §Y）与既有基线图会失效。

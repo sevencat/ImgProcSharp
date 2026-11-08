@@ -58,4 +58,62 @@ public class PixelOpsTests
     {
         Assert.Throws<ArgumentNullException>(() => PixelOps.ToBgra32(null!));
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(20)]
+    [InlineData(1000)]
+    public void PremultiplyInPlaceMatchesScalarReference(int pixels)
+    {
+        var random = new Random(17 + pixels);
+        var source = new byte[pixels * 4];
+        random.NextBytes(source);
+
+        // 覆盖 alpha 的两个边界：全透明不该改变 RGB、全不透明必须原样保留
+        source[3] = 0;
+        source[source.Length - 1] = 255;
+
+        byte[] actual = (byte[])source.Clone();
+        PixelOps.PremultiplyInPlace(actual);
+
+        byte[] expected = ScalarPremultiply(source);
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public void PremultiplyIntoDestinationMatchesInPlace()
+    {
+        var random = new Random(4242);
+        var source = new byte[64 * 4];
+        random.NextBytes(source);
+
+        byte[] inPlace = (byte[])source.Clone();
+        PixelOps.PremultiplyInPlace(inPlace);
+
+        var destination = new byte[source.Length];
+        PixelOps.Premultiply(source, destination);
+
+        Assert.Equal(inPlace, destination);
+    }
+
+    private static byte[] ScalarPremultiply(byte[] straight)
+    {
+        var result = new byte[straight.Length];
+        for (int i = 0; i < straight.Length; i += 4)
+        {
+            int a = straight[i + 3];
+            for (int c = 0; c < 3; c++)
+            {
+                int t = (straight[i + c] * a) + 0x80;
+                result[i + c] = (byte)((t + (t >> 8)) >> 8);
+            }
+
+            result[i + 3] = straight[i + 3];
+        }
+
+        return result;
+    }
 }

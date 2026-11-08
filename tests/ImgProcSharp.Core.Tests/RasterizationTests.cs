@@ -45,6 +45,34 @@ public class RasterizationTests
         Assert.Equal(generic.Buffer, fast.Buffer);
     }
 
+    [Theory]
+    [InlineData(0, 0, 16, 16)]
+    [InlineData(3, 2, 7, 9)]
+    [InlineData(2.5f, 3.25f, 9.5f, 7.75f)]
+    [InlineData(-4.5f, -3.5f, 12.5f, 10.5f)]
+    public void OpaqueRectangleFastPathMatchesGenericPath(float x, float y, float width, float height)
+    {
+        // 底色半透明：不透明直写分支若写错（比如漏掉覆盖语义），逐字节对拍立刻暴露
+        var background = new Color(10, 20, 30, 64);
+        using Canvas fast = Canvas.Create(16, 16, background);
+        using Canvas generic = Canvas.Create(16, 16, background);
+        var color = new Color(200, 120, 40, 255);
+
+        new DrawingContext(fast).Fill(color, new RectangularPolygon(x, y, width, height));
+
+        IPath path = new PathBuilder()
+            .MoveTo(x, y)
+            .LineTo(x + width, y)
+            .LineTo(x + width, y + height)
+            .LineTo(x, y + height)
+            .CloseFigure()
+            .Build();
+
+        new DrawingContext(generic).Fill(color, path);
+
+        Assert.Equal(generic.Buffer, fast.Buffer);
+    }
+
     [Fact]
     public void TriangleCoverageMatchesItsArea()
     {

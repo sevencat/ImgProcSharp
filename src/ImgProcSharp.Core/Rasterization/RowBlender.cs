@@ -79,9 +79,18 @@ internal static class RowBlender
         Vector128<ushort> full = Vector128.Create((ushort)255);
 
         ref byte dstRef = ref MemoryMarshal.GetReference(dst);
+        ref readonly byte covRef = ref MemoryMarshal.GetReference(coverage);
 
         int pixels = coverage.Length;
         int i = 0;
+
+        // 一次拖 16 字节 coverage（只用到前 4 个），比 16 条标量插入（pinsrb）便宜得多。
+        for (; i + 16 <= pixels; i += 4)
+        {
+            BlendFour(ref dstRef, i * Canvas.BytesPerPixel, Vector128.LoadUnsafe(in covRef, (nuint)i), srcPx, srcAlpha, full);
+        }
+
+        // 尾部不足 16 像素：仍按 4 像素一组走向量，coverage 用安全的逐字节构造，不越界读取
         for (; i + 4 <= pixels; i += 4)
         {
             Vector128<byte> covBytes = Vector128.Create(
@@ -89,25 +98,38 @@ internal static class RowBlender
                 (byte)0, (byte)0, (byte)0, (byte)0,
                 (byte)0, (byte)0, (byte)0, (byte)0,
                 (byte)0, (byte)0, (byte)0, (byte)0);
-            Vector128<ushort> covWide = Vector128.WidenLower(covBytes);
-
-            Vector128<byte> raw = Vector128.LoadUnsafe(ref dstRef, (nuint)(i * Canvas.BytesPerPixel));
-            Vector128<ushort> low = Vector128.WidenLower(raw);
-            Vector128<ushort> high = Vector128.WidenUpper(raw);
-
-            Vector128<ushort> covLow = Vector128.Shuffle(covWide, DupFirstTwo);
-            Vector128<ushort> covHigh = Vector128.Shuffle(covWide, DupLastTwo);
-
-            Vector128<ushort> resultLow = Blend(low, srcPx, srcAlpha, covLow, full);
-            Vector128<ushort> resultHigh = Blend(high, srcPx, srcAlpha, covHigh, full);
-
-            Vector128.StoreUnsafe(Vector128.Narrow(resultLow, resultHigh), ref dstRef, (nuint)(i * Canvas.BytesPerPixel));
+            BlendFour(ref dstRef, i * Canvas.BytesPerPixel, covBytes, srcPx, srcAlpha, full);
         }
 
         if (i < pixels)
         {
             OverSolidScalar(dst.Slice(i * Canvas.BytesPerPixel), color, coverage.Slice(i));
         }
+    }
+
+    /// <summary>混合 4 个像素；<paramref name="covBytes"/> 的低 4 字节是覆盖率、其余必须是 0。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void BlendFour(
+        ref byte dst,
+        int offset,
+        Vector128<byte> covBytes,
+        Vector128<ushort> srcPx,
+        Vector128<ushort> srcAlpha,
+        Vector128<ushort> full)
+    {
+        Vector128<ushort> covWide = Vector128.WidenLower(covBytes);
+
+        Vector128<byte> raw = Vector128.LoadUnsafe(ref dst, (nuint)offset);
+        Vector128<ushort> low = Vector128.WidenLower(raw);
+        Vector128<ushort> high = Vector128.WidenUpper(raw);
+
+        Vector128<ushort> covLow = Vector128.Shuffle(covWide, DupFirstTwo);
+        Vector128<ushort> covHigh = Vector128.Shuffle(covWide, DupLastTwo);
+
+        Vector128<ushort> resultLow = Blend(low, srcPx, srcAlpha, covLow, full);
+        Vector128<ushort> resultHigh = Blend(high, srcPx, srcAlpha, covHigh, full);
+
+        Vector128.StoreUnsafe(Vector128.Narrow(resultLow, resultHigh), ref dst, (nuint)offset);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

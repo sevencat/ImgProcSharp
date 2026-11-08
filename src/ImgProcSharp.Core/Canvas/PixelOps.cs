@@ -1,3 +1,7 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+
 namespace ImgProcSharp;
 
 /// <summary>
@@ -5,6 +9,14 @@ namespace ImgProcSharp;
 /// </summary>
 public static class PixelOps
 {
+    // 把 4 个像素的 alpha 复制到各自的 RGBA 四个通道（ushort 视角下索引 3 与 7）
+    private static readonly Vector128<ushort> AlphaChannelIndex = Vector128.Create(
+        (ushort)3, (ushort)3, (ushort)3, (ushort)3, (ushort)7, (ushort)7, (ushort)7, (ushort)7);
+
+    // 选中 alpha 通道本身：预乘不改 alpha，算完用原值覆盖回去
+    private static readonly Vector128<ushort> AlphaChannelMask = Vector128.Create(
+        (ushort)0, (ushort)0, (ushort)0, (ushort)0xFFFF, (ushort)0, (ushort)0, (ushort)0, (ushort)0xFFFF);
+
     /// <summary>
     /// x / 255 的定点实现（四舍五入）：<c>t = x + 0x80; (t + (t &gt;&gt; 8)) &gt;&gt; 8</c>。
     /// </summary>
@@ -21,6 +33,7 @@ public static class PixelOps
     /// 预乘 → 直通：<c>(c * 255 + a / 2) / a</c>。
     /// <paramref name="alpha"/> &lt; 8 的像素直接归零，避免把预乘误差放大成噪点（见 misc §F）。
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static byte Unpremultiply(byte channel, byte alpha)
     {
         if (alpha < 8)
@@ -45,14 +58,7 @@ public static class PixelOps
             throw new ArgumentException("源与目标的长度必须相同且是 4 的倍数。", nameof(destination));
         }
 
-        for (int i = 0; i < straight.Length; i += 4)
-        {
-            byte a = straight[i + 3];
-            destination[i] = (byte)Mul255(straight[i], a);
-            destination[i + 1] = (byte)Mul255(straight[i + 1], a);
-            destination[i + 2] = (byte)Mul255(straight[i + 2], a);
-            destination[i + 3] = a;
-        }
+        PremultiplyCore(straight, destination);
     }
 
     /// <summary>原地预乘。</summary>
@@ -63,18 +69,55 @@ public static class PixelOps
             throw new ArgumentException("长度必须是 4 的倍数。", nameof(pixels));
         }
 
-        for (int i = 0; i < pixels.Length; i += 4)
-        {
-            byte a = pixels[i + 3];
-            if (a == 255)
-            {
-                continue;
-            }
+        PremultiplyCore(pixels, pixels);
+    }
 
-            pixels[i] = (byte)Mul255(pixels[i], a);
-            pixels[i + 1] = (byte)Mul255(pixels[i + 1], a);
-            pixels[i + 2] = (byte)Mul255(pixels[i + 2], a);
+    /// <summary>
+    /// 预乘内核：每轮 4 个像素，<c>Vector128</c> 把字节加宽到 ushort、alpha 广播到 RGBA、
+    /// 定点除 255、再把 alpha 换回原值。与标量路径逐字节相同（有单元测试守住）。
+    /// <para>源与目标允许是同一块内存（原地预乘时逐块 Load/Store 同一地址）。</para>
+    /// </summary>
+    private static void PremultiplyCore(ReadOnlySpan<byte> source, Span<byte> destination)
+    {
+        int pixels = source.Length / 4;
+        ref readonly byte sourceRef = ref MemoryMarshal.GetReference(source);
+        ref byte destinationRef = ref MemoryMarshal.GetReference(destination);
+
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 4 <= pixels; i += 4)
+            {
+                Vector128<byte> raw = Vector128.LoadUnsafe(in sourceRef, (nuint)(i * 4));
+                Vector128<ushort> low = Vector128.WidenLower(raw);
+                Vector128<ushort> high = Vector128.WidenUpper(raw);
+
+                Vector128<ushort> lowPremultiplied = Div255(low * Vector128.Shuffle(low, AlphaChannelIndex));
+                Vector128<ushort> highPremultiplied = Div255(high * Vector128.Shuffle(high, AlphaChannelIndex));
+
+                Vector128<ushort> resultLow = Vector128.ConditionalSelect(AlphaChannelMask, low, lowPremultiplied);
+                Vector128<ushort> resultHigh = Vector128.ConditionalSelect(AlphaChannelMask, high, highPremultiplied);
+
+                Vector128.StoreUnsafe(Vector128.Narrow(resultLow, resultHigh), ref destinationRef, (nuint)(i * 4));
+            }
         }
+
+        for (; i < pixels; i++)
+        {
+            int o = i * 4;
+            byte a = source[o + 3];
+            destination[o] = (byte)Mul255(source[o], a);
+            destination[o + 1] = (byte)Mul255(source[o + 1], a);
+            destination[o + 2] = (byte)Mul255(source[o + 2], a);
+            destination[o + 3] = a;
+        }
+    }
+
+    /// <summary>ushort 通道上的 <c>x / 255</c>，与 <see cref="RowBlender"/> 同一实现。</summary>
+    private static Vector128<ushort> Div255(Vector128<ushort> x)
+    {
+        Vector128<ushort> t = x + Vector128.Create((ushort)0x80);
+        return (t + Vector128.ShiftRightLogical(t, 8)) >>> 8;
     }
 
     /// <summary>预乘 RGBA → 直通 RGBA。</summary>

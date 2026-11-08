@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 
 namespace ImgProcSharp;
 
@@ -53,6 +54,13 @@ internal static class RectangleFill
                 // 整行全覆盖：连 coverage 都不用读，直接把 255 行喂给混合内核
                 if (coveredSubSamples == SubSamples && left <= firstColumn && right >= lastColumn + 1)
                 {
+                    // 不透明纯色 + 整行全覆盖：source-over 退化为覆盖写，跳过逐像素混合
+                    if (color.A == 255)
+                    {
+                        MemoryMarshal.Cast<byte, uint>(destination).Fill(Canvas.PackPremultiplied(color));
+                        continue;
+                    }
+
                     RowBlender.OverSolid(destination, color, full.AsSpan(0, span));
                     continue;
                 }
