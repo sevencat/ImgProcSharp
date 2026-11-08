@@ -30,7 +30,7 @@ public interface IImageProcessingContext
 
     IImageProcessingContext Fill(Color color, IPath path, FillRule rule = FillRule.NonZero);
 
-    /// <summary>描边（圆角连接 + 圆头端点）。</summary>
+    /// <summary>描边：线宽、连接方式、端点形状与虚线都由画笔决定。</summary>
     IImageProcessingContext Draw(IPen pen, IPath path);
 
     /// <summary>用纯色描边。</summary>

@@ -106,6 +106,24 @@ internal static class Program
                 new TextOptions { Size = 54f });
 
             context.Draw(new Pen(Color.FromRgb(190, 180, 255), 1.5f), strokePath);
+
+            // 描边样式：miter 尖角 + 平头端点，以及虚线（图案长度单位是线宽倍数）
+            Path chevron = new PathBuilder().MoveTo(486, 398).LineTo(530, 348).LineTo(574, 398).Build();
+            context.Draw(
+                new Pen(Color.FromRgb(120, 255, 190), 10f)
+                {
+                    LineJoin = LineJoin.Miter,
+                    LineCap = LineCap.Butt,
+                },
+                chevron);
+
+            context.Draw(
+                new Pen(Color.FromRgba(255, 255, 255, 120), 2f)
+                {
+                    DashPattern = [8f, 5f],
+                    LineCap = LineCap.Round,
+                },
+                new PathBuilder().MoveTo(486, 424).LineTo(630, 424).Build());
         });
 
         Directory.CreateDirectory("output");

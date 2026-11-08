@@ -27,11 +27,11 @@ File.WriteAllBytes("out.png", PngWriter.Encode(straight, image.Width, image.Heig
 - 输入：`Sdcb.SimdCodecs` 1.4.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm）。
 - 输出：**本库不提供 `Save`**。需要 PNG 时直接用 `Sdcb.SimdCodecs.Png.PngWriter`（上面四行）；其他格式输出等 0.2（见 `plan.md` §Q）。
 - 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`）。
-- 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（圆头端点 + 圆角连接）、`Matrix3x2` 变换（笔刷与线宽同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
+- 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（Miter/Bevel/Round 连接、Butt/Round/Square 端点、`MiterLimit`、虚线）、`Matrix3x2` 变换（笔刷、线宽与虚线同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
 - 文字：内嵌文泉驿微米黑（2 MB gzip），无 kerning / 无 GSUB / 无双向文本 / 无彩色 emoji。
-- 还没做（0.2）：Miter/Bevel 连接与虚线（M6）；混合模式、图层。差距表见 `misc.md` §I、§X、§Y。
+- 还没做（0.2）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。
 
-## 现在就能用的部分（core + ext，M7 完成）
+## 现在就能用的部分（core + ext，M6/M7 完成）
 
 ```csharp
 using System.Numerics;
@@ -53,9 +53,17 @@ ctx.Fill(
         new ColorStop(1f, Color.Blue)),
     new RoundRectanglePolygon(24, 300, 400, 60, 16));
 
-// 描边：v1 只有圆头端点 + 圆角连接（Miter/Bevel/Dash 在 0.2）
-ctx.Draw(new Pen(Color.Orange, 6f), new CirclePolygon(160, 200, 60));
+// 描边：默认圆头端点 + 圆角连接
+ctx.Draw(new Pen(Color.Yellow, 6f), new CirclePolygon(160, 200, 60));
 ctx.Draw(Color.Black, 1.5f, new RoundRectanglePolygon(24, 300, 400, 60, 16));
+
+// 描边样式：尖角 + 平头端点 / 虚线（图案长度是线宽倍数：4×6 实、4×4 虚）
+ctx.Draw(
+    new Pen(Color.Yellow, 4f) { LineJoin = LineJoin.Miter, LineCap = LineCap.Butt },
+    new PathBuilder().MoveTo(500, 320).LineTo(600, 260).LineTo(700, 320).Build());
+ctx.Draw(
+    new Pen(Color.Black, 4f) { DashPattern = [6f, 4f] },
+    new PathBuilder().MoveTo(500, 360).LineTo(760, 360).Build());
 
 // 快路径：字形掩码直接当 coverage，与形状共用混合内核
 ctx.DrawText("Hello, 世界", new PointF(48, 48), new TextOptions { Size = 40, Color = Color.White });
@@ -66,7 +74,7 @@ ctx.FillText(new SolidBrush(Color.Black), "轮廓文字", new PointF(48, 150), n
 // 变换：不是栈，就是「当前矩阵」；PushTransform 左乘（等价 SVG 的嵌套 transform）
 ctx.PushTransform(Matrix3x2.CreateTranslation(600, 120));
 ctx.PushTransform(Matrix3x2.CreateRotation(-0.2f));
-ctx.Fill(new SolidBrush(Color.Crimson), new RectangularPolygon(-60, -24, 120, 48));
+ctx.Fill(new SolidBrush(Color.Red), new RectangularPolygon(-60, -24, 120, 48));
 ctx.ResetTransform();
 
 // 描边文字：轮廓路径自己拿去 Draw；非恒等变换时 DrawText 也会自动走这条慢路径
@@ -84,6 +92,7 @@ SizeF measured = TextFont.BuiltIn.MeasureText("Hello, 世界", 40f);
 变换与裁剪的语义，写在这里免得踩：
 
 - 坐标都在用户坐标系里给，`Fill`/`Draw` 入口一次性把矩阵乘到路径上。线宽跟着缩放（`Width × sqrt(|det|)`，非等比取几何平均）；渐变/图案笔刷也跟随变换，几何（起止点、圆心、瓦片原点）都按用户坐标系理解。
+- 描边样式：`LineJoin` 决定顶点外侧怎么补（`Round` 圆盘、`Bevel` 斜切、`Miter` 闭式尖角，尖角超过 `MiterLimit` 自动退回 `Bevel`）；`LineCap` 只作用于开放路径的两端；虚线图案的长度单位是**线宽倍数**，随线宽与变换一起缩放，`DashOffset` 与 SVG 的 `stroke-dashoffset` 同向。
 - 变换是「当前矩阵」不是栈：`PushTransform` 只是左乘，配 `SetTransform`/`ResetTransform`。裁剪才是栈：`PushClip`/`PopClip` 必须配对，空栈 `PopClip` 会抛 `InvalidOperationException`。
 - 裁剪每层是一张画布大小的 A8 掩码（1080p 约 2 MB），边界带抗锯齿；有裁剪时纯色矩形会退到通用路径。
 
@@ -103,7 +112,7 @@ image.Mutate(x => x
 
 ```pwsh
 dotnet run --project samples/ImgProcSharp.Samples
-# → output/result.png（960×540：渐变背景、圆角卡片、中英文排版、裁剪条纹带、圆环描边、旋转徽章、描边文字）
+# → output/result.png（960×540：渐变背景、圆角卡片、中英文排版、裁剪条纹带、圆环描边、旋转徽章、描边文字、miter 尖角与虚线）
 
 dotnet run -c Release --project benchmarks/ImgProcSharp.Benchmarks -- --filter "*Stroke*"
 # 填充/描边/文字/编解码/端到端；ShortRunJob，十几秒出数，正式数据加 --job default

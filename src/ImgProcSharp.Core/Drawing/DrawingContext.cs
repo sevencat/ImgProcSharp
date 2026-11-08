@@ -133,7 +133,7 @@ public sealed class DrawingContext
     public void Fill(Color color, IPath path, FillRule rule = FillRule.NonZero)
         => Fill(new SolidBrush(color), path, rule);
 
-    /// <summary>用画笔描边：线宽按变换的缩放因子等比放大。</summary>
+    /// <summary>用画笔描边：线宽与虚线图案都按变换的缩放因子等比放大。</summary>
     public void Draw(IPen pen, IPath path)
     {
         ArgumentNullException.ThrowIfNull(pen);
@@ -144,6 +144,32 @@ public sealed class DrawingContext
         {
             throw new ArgumentOutOfRangeException(nameof(pen), width, "线宽必须是有限正数。");
         }
+
+        LineJoin join = pen.LineJoin;
+        if (!Enum.IsDefined(join))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pen), join, "未知的连接方式。");
+        }
+
+        LineCap cap = pen.LineCap;
+        if (!Enum.IsDefined(cap))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pen), cap, "未知的端点形状。");
+        }
+
+        float miterLimit = pen.MiterLimit;
+        if (!(miterLimit >= 1f) || float.IsInfinity(miterLimit))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pen), miterLimit, "MiterLimit 必须 ≥ 1 且有限。");
+        }
+
+        float dashOffset = pen.DashOffset;
+        if (!float.IsFinite(dashOffset))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pen), dashOffset, "虚线偏移必须是有限数。");
+        }
+
+        float[]? dashPattern = ValidateDashPattern(pen.DashPattern);
 
         Matrix3x2 transform = Transform;
         float scale = 1f;
@@ -166,8 +192,40 @@ public sealed class DrawingContext
             return;
         }
 
+        float actualWidth = width * scale;
+
+        // 图案单位是线宽倍数，因此跟着实际线宽（含变换缩放）一起放大
+        StrokeStyle style = StrokeStyle.Create(join, cap, miterLimit, dashPattern, dashOffset, actualWidth);
+
         // 轮廓已经在画布坐标系里，不能再让 Fill 乘一次变换
-        FillCore(new SolidBrush(pen.Color), StrokeOutline.Build(flattened, width * scale), FillRule.NonZero);
+        FillCore(new SolidBrush(pen.Color), StrokeOutline.Build(flattened, actualWidth, style), FillRule.NonZero);
+    }
+
+    /// <summary>校验自定义 <see cref="IPen"/> 返回的虚线图案；<see cref="Pen"/> 已在构造时校验过。</summary>
+    private static float[]? ValidateDashPattern(float[]? pattern)
+    {
+        if (pattern is null || pattern.Length == 0)
+        {
+            return null;
+        }
+
+        double total = 0d;
+        foreach (float length in pattern)
+        {
+            if (!(length >= 0f) || float.IsInfinity(length))
+            {
+                throw new ArgumentOutOfRangeException(nameof(pattern), length, "虚线长度必须是非负有限数。");
+            }
+
+            total += length;
+        }
+
+        if (!(total > 0d))
+        {
+            throw new ArgumentException("虚线图案不能全为 0。", nameof(pattern));
+        }
+
+        return pattern;
     }
 
     /// <summary>用纯色描边。</summary>

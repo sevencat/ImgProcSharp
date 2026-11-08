@@ -60,7 +60,7 @@ f:/code/ImgProcSharp/
       Paths/                       # IPath, Path, PathBuilder, PathFlattener, GlyphPathBridge
       Rasterization/               # ScanlineRasterizer, CoverageBuffer, FillRule, RowBlender
       Brushes/                     # IBrush, SolidBrush, LinearGradientBrush, RadialGradientBrush, PatternBrush
-      Pens/                        # IPen, Pen, StrokeOutline（v1 只有圆头 + 圆角）
+      Pens/                        # IPen, Pen, LineJoin/LineCap, StrokeStyle, StrokeOutline
       Text/                        # GlyphRaster 引擎（全 internal）、TextOptions/TextDrawing/GlyphPathBridge（见 §6.7）
         TrueTypeFont.cs … TextPainter.cs
         Fonts/WenQuanYiMicroHei.ttf.gz
@@ -84,7 +84,7 @@ f:/code/ImgProcSharp/
     ImgProcSharp.Benchmarks/       # BenchmarkDotNet（填充/描边/文字/编解码）
 ```
 
-已完成（截至 M7，Core 180 个用例 ×2 目标框架 + ext 16 个用例，全绿）：
+已完成（截至 M7，Core 195 个用例 ×2 目标框架 + ext 16 个用例，全绿）：
 
 ```
 src/ImgProcSharp.Core/Colors/Color.cs                    预乘/直通、Blend、Div255
@@ -97,7 +97,7 @@ src/ImgProcSharp.Core/Paths/{IPath,Path,PathBuilder,PathBuilder.Arc,PathFlattene
 src/ImgProcSharp.Core/Resampling/{IResampler,ResizeOptions,Resizer}.cs
 src/ImgProcSharp.Core/Rasterization/{FillRule,CoverageBuffer,ScanlineRasterizer,RectangleFill,RowBlender}.cs
 src/ImgProcSharp.Core/Brushes/{IBrush,GradientBrush,PatternBrush}.cs   纯色/线性/径向/图案笔刷
-src/ImgProcSharp.Core/Pens/{IPen,StrokeOutline}.cs      画笔 + 描边轮廓生成
+src/ImgProcSharp.Core/Pens/{IPen,LineJoin,LineCap,StrokeStyle,StrokeOutline}.cs  画笔 + 描边轮廓
 src/ImgProcSharp.Core/Drawing/DrawingContext.cs          Fill/Draw/Clear + 变换 + 裁剪掩码栈（BlendCoverage 给字形掩码复用）
 src/ImgProcSharp.Core/Text/{TextFont,TextFont.Layout}.cs 公开门面（Layout/Measure/Advance）
 src/ImgProcSharp.Core/Text/{TextOptions,TextAlign,TextDrawing}.cs  DrawText/FillText/MeasureText
@@ -109,10 +109,11 @@ src/ImgProcSharp.SimdCodecs/ImageDecoderBridge.cs         唯一接触 SimdCodec
 src/ImgProcSharp.SimdCodecs/IImageProcessingContext.cs    链式接口
 src/ImgProcSharp.SimdCodecs/ImageProcessingContext.cs     实现（Resize 换画布）
 tests/ImgProcSharp.Core.Tests/StrokeAndTransformTests.cs  描边/变换/文字轮廓
+tests/ImgProcSharp.Core.Tests/StrokeStyleTests.cs         连接/端帽/MiterLimit/虚线/画笔校验
 tests/ImgProcSharp.Core.Tests/ClipTests.cs                裁剪掩码（嵌套/描边/文字/AA/变换）
 tests/ImgProcSharp.Core.Tests/BrushTransformTests.cs       渐变/图案笔刷跟随变换
 tests/ImgProcSharp.SimdCodecs.Tests/ImageTests.cs         解码保真/方向/链式/Mutate 绘制与裁剪
-samples/ImgProcSharp.Samples/Program.cs                  渐变+卡片+中文+裁剪条纹+描边+旋转，输出 result.png
+samples/ImgProcSharp.Samples/Program.cs                  渐变+卡片+中文+裁剪条纹+描边+旋转+尖角+虚线，输出 result.png
 samples/ImgProcSharp.AotSmoke/Program.cs                   AOT 冒烟：裁剪+变换+文字+PNG 往返，打印确定性哈希
 benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/文字/编解码/端到端
 ```
@@ -215,7 +216,7 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 </Project>
 ```
 
-`Program.cs` 不依赖任何素材文件：整张图由代码画出来（渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字），最后用 `PngWriter` 写到 `output/result.png`。`dotnet run --project samples/ImgProcSharp.Samples` 一条命令即可复现，肉眼就能验 AA、渐变脏边、中文缺字、描边接缝、旋转文字锯齿、裁剪边界。
+`Program.cs` 不依赖任何素材文件：整张图由代码画出来（渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线），最后用 `PngWriter` 写到 `output/result.png`。`dotnet run --project samples/ImgProcSharp.Samples` 一条命令即可复现，肉眼就能验 AA、渐变脏边、中文缺字、描边接缝、miter 尖角与虚线、旋转文字锯齿、裁剪边界。
 
 另外两个同级工程：`samples/ImgProcSharp.AotSmoke`（`PublishAot=true`，打印确定性哈希，JIT 与 AOT 必须逐字节一致）与 `benchmarks/ImgProcSharp.Benchmarks`（BenchmarkDotNet，`--filter`/`--job` 照常）。
 
@@ -430,26 +431,36 @@ public sealed class PatternBrush(Canvas tile, PointF origin) : IBrush;   // 平�
 ### 6.6 描边
 
 ```csharp
+public enum LineJoin { Miter, Bevel, Round }
+public enum LineCap { Butt, Round, Square }
+
 public interface IPen
 {
     Color Color { get; }
-    float Width { get; }      // 画布像素，必须为正
+    float Width { get; }                        // 画布像素，必须为正
+    LineJoin LineJoin => LineJoin.Round;        // 默认实现：只关心颜色的画笔无需重写
+    LineCap LineCap => LineCap.Round;
+    float MiterLimit => 4f;
+    float[]? DashPattern => null;               // 线宽倍数；奇数长度按 SVG 语义重复
+    float DashOffset => 0f;
 }
 
-public sealed class Pen(Color color, float width = 1f) : IPen;
+public sealed class Pen(Color color, float width = 1f) : IPen;   // 样式用 init 属性设置
 
 internal static class StrokeOutline
 {
-    public static Path Build(FlattenedPath source, float width);   // stroke → 同向闭环轮廓
+    public static Path Build(FlattenedPath source, float width, in StrokeStyle style);
 }
 ```
 
-实现要点（详见 misc §X）：flatten → 每段生成 ±w/2 的四边形 → 每个顶点补一个半径 w/2 的圆盘 → 所有子路径统一成「正面积绕向」→ 丢给 `NonZero` 填充。**nonzero 自动完成并集**，因此不需要多边形布尔运算，这是把描边从「很难」降到「中等」的关键；圆盘同时充当圆角连接与圆头端点，接缝处不会出现「两次半透明叠加」的深色线，因为 coverage 是整条轮廓一次算出来的。
+实现要点（详见 misc §X）：flatten → 每段生成 ±w/2 的四边形 → 顶点按 `LineJoin` 补连接、开放端点按 `LineCap` 补端帽 → 所有子路径统一成「正面积绕向」→ 丢给 `NonZero` 填充。**nonzero 自动完成并集**，因此不需要多边形布尔运算，这是把描边从「很难」降到「中等」的关键；接缝处不会出现「两次半透明叠加」的深色线，因为 coverage 是整条轮廓一次算出来的。
 
-- v1 只有圆角连接 + 圆头端点。`LineJoin`/`LineCap`/`MiterLimit`/`DashPattern` 留到 0.2：圆形已经覆盖绝大多数 UI 场景（折线图、卡片边框、图标），而 miter 尖角还得处理「超限退回 bevel」。
+- 连接：两条边的叉积决定外侧，`miter` 用两条外侧偏移线的闭式交点（比值 = 1/sin(θ/2)），超过 `MiterLimit` 退回 `bevel`；共线与 180° 折返不补几何（四边形已贴合）；重复点补圆盘兜底。
+- 端帽：`butt` 不补；`round` 补圆盘（内半被四边形吸收）；`square` 补一个沿切向平移半个线宽的矩形。
+- 虚线：图案单位是**线宽倍数**，所以线宽/变换缩放时虚线段长自动跟着变；flatten 后按弧长切段，每一段是独立的开折线（两端补端帽、内部顶点用 join）。闭合路径跨起点的两段会合并；整圈都落在实线段内时按闭合轮廓处理（起点补连接而不是两个端帽）。
 - 笔宽跟着变换的缩放走：`actual = Width × sqrt(|det(Matrix)|)`。非等比缩放下取几何平均，文档写明。
-- 展平后没有任何点的路径（只有 `MoveTo`）不产生像素。
-- 特化快路径（`DrawCircle` 直接生成环带）不做：M7 基准显示描边的主要成本在扫描线（已加活动边表），圆盘法精度够用，特化收益不足以抵消一条独立代码路径的维护成本。
+- 展平后没有任何点的路径（只有 `MoveTo`）不产生像素；单点且端帽为平头时也不产生像素。
+- 特化快路径（`DrawCircle` 直接生成环带、矩形/圆角矩形的一体化环）不做：M7 基准显示描边的主要成本在扫描线（已加活动边表），四边形 ∪ 连接/端帽的边数在同一量级，特化收益不足以抵消一条独立代码路径的维护成本。
 
 ### 6.7 文字
 
@@ -640,15 +651,15 @@ image.Mutate(x => x
 | M2 | 路径 + 填充 | `IPath` 图元（`Path`/`RectangularPolygon`/`EllipsePolygon`/`Polygon`/`RoundRectanglePolygon`）、`PathBuilder`/展平/`ArcTo`、`ScanlineRasterizer`（NonZero/EvenOdd + AA）、`RectangleFill` 快路径（与通用路径逐字节一致）、四种笔刷、`DrawingContext.Fill`（**已完成**） | 2.5d |
 | M3 | 文字 | GlyphRaster 拷入 + 命名空间/可见性改造（引擎 `internal`）、`TextFont` 门面收敛、`TextOptions`/`TextAlign`、`DrawText` 快路径、`FillText` 轮廓慢路径、`GlyphPathBridge`、`MeasureText`、折行/对齐、中英文测试（**已完成**） | 1.5d |
 | M4 | ext 端到端 | `Image` 门面（Load/Create/Mutate/Clone/ApplyOrientation）、解码桥、链式上下文、Exif 方向、打包（**编码不做**：测试用 `Sdcb.SimdCodecs.Png.PngWriter`） | 2.5d |
-| M5 | 描边 + 变换 + 示例 ✅ | `IPen`/`Pen`、`StrokeOutline`（四边形 ∪ 圆盘）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`GetTextPath`、samples 控制台（`output/result.png`，用 `PngWriter` 输出）、README 用法（**已完成**：v1 只有圆角连接 + 圆头端点，见 misc §X） | 1.5d |
-| M6 | 描边（0.2） | `LineJoin`/`LineCap`（Miter/Round/Bevel、Butt/Round/Square）、`MiterLimit`、`DashPattern`、矩形/圆角/圆特化快路径 + 测试 | 3d |
+| M5 | 描边 + 变换 + 示例 ✅ | `IPen`/`Pen`、`StrokeOutline`（四边形 ∪ 圆盘）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`GetTextPath`、samples 控制台（`output/result.png`，用 `PngWriter` 输出）、README 用法（**已完成**：当时只有圆角连接 + 圆头端点，M6 已补齐） | 1.5d |
+| M6 | 描边扩展 ✅ | `LineJoin`（Miter/Bevel/Round）、`LineCap`（Butt/Round/Square）、`MiterLimit` 超限退回 bevel、`DashPattern`/`DashOffset`（线宽倍数，闭合路径跨起点合并）、`IPen` 默认成员保持向后兼容（**已完成**：15 个用例，见 misc §Z；矩形/圆/圆角矩形特化快路径经 M7 基准评估后不做） | 3d |
 | M7 | 裁剪 / AOT / 基准 ✅ | `PushClip`/`PopClip`（A8 掩码栈）、笔刷跟随变换、BenchmarkDotNet（填充/描边/文字/编解码）、AOT 发布 smoke（**已完成**：win-x64 自包含 9.8 MB，JIT/AOT 输出逐字节一致，见 misc §Y） | 2d |
 
-合计 **18 人天**；到 M7 结束（**13 天**）就是一个能发 0.1 的可用版本。M6 拆成 0.2。
+合计 **18 人天**；到 M7 结束（**13 天**）就是一个能发 0.1 的可用版本，M6 原计划拆到 0.2，现已一并完成。
 
 顺序依赖：M0 → M1 → M2 → M3 → M4 → M5 为关键路径；M6、M7 依赖 M2，可并行或后置。
 
-进度：**M0、M1、M1.5、M2、M3、M4、M5、M7 已完成**（Core 180 个用例在 net8.0 / net10.0 上全绿，ext 16 个用例在 net10.0 上全绿，`dotnet build` 0 警告，示例产出 960×540 PNG，AOT 发布产物与 JIT 输出逐字节一致）。M2 已落地：几何与路径模型（`IPath`/`Path`/`PathBuilder`/展平/五种图元）、SVG 端点弧 `ArcTo`、`RoundRectanglePolygon`、`ScanlineRasterizer`（4× 子采样 + 横向精确覆盖，NonZero/EvenOdd）、`CoverageBuffer`、`RectangleFill` 快路径、`DrawingContext.Fill`，以及 M2 后段的四种笔刷（`SolidBrush`/`LinearGradientBrush`/`RadialGradientBrush`/`PatternBrush`，渐变预乘插值 + 可选 ordered dither）。M3 已落地：GlyphRaster 引擎拷入（`internal`）、`TextFont` 门面、`TextOptions`/`TextAlign`、`DrawText` 快路径、`FillText` 轮廓慢路径、`GlyphPathBridge`、`MeasureText`、折行与对齐。M4 已落地：`Image` 门面（`Load`/`Create`/`Mutate`/`Clone`/`ApplyOrientation`）、`ImageDecoderBridge`（`TryReadInfo` + `TryDecode` + 逐行预乘）、`IImageProcessingContext` 链式糖、端到端测试（PNG 素材现造）。**公开 API 不含编码**：`PngWriter` 由调用方直接用（测试即如此）。M5 已落地：`IPen`/`Pen`、`StrokeOutline`（线段四边形 ∪ 顶点圆盘，统一绕向走 NonZero 并集）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`TextDrawing.GetTextPath`、`DrawText` 在非恒等变换下自动改走轮廓路径、samples 示例工程（无素材依赖，`PngWriter` 输出 `output/result.png`）。M7 已落地：`PushClip`/`PopClip`（画布大小 A8 掩码栈，填充/描边/文字三条路径统一走 `BlendCoverage`）、渐变与图案笔刷跟随变换（逆矩阵采样 + 不可变副本）、BenchmarkDotNet 基准工程（填充/描边/文字/编解码/端到端）、NativeAOT smoke 工程（`PublishAot`，win-x64 自包含 9.8 MB，输出哈希与 JIT 一致）。剩余：只有 0.2 的描边扩展（M6：Miter/Bevel/Square/Dash）。M0 实际未做 CI（仓库尚无远端），其余按计划落地。
+进度：**M0、M1、M1.5、M2、M3、M4、M5、M6、M7 全部完成**（Core 195 个用例在 net8.0 / net10.0 上全绿，ext 16 个用例在 net10.0 上全绿，`dotnet build` 0 警告，示例产出 960×540 PNG，AOT 发布产物与 JIT 输出逐字节一致）。M2 已落地：几何与路径模型（`IPath`/`Path`/`PathBuilder`/展平/五种图元）、SVG 端点弧 `ArcTo`、`RoundRectanglePolygon`、`ScanlineRasterizer`（4× 子采样 + 横向精确覆盖，NonZero/EvenOdd）、`CoverageBuffer`、`RectangleFill` 快路径、`DrawingContext.Fill`，以及 M2 后段的四种笔刷（`SolidBrush`/`LinearGradientBrush`/`RadialGradientBrush`/`PatternBrush`，渐变预乘插值 + 可选 ordered dither）。M3 已落地：GlyphRaster 引擎拷入（`internal`）、`TextFont` 门面、`TextOptions`/`TextAlign`、`DrawText` 快路径、`FillText` 轮廓慢路径、`GlyphPathBridge`、`MeasureText`、折行与对齐。M4 已落地：`Image` 门面（`Load`/`Create`/`Mutate`/`Clone`/`ApplyOrientation`）、`ImageDecoderBridge`（`TryReadInfo` + `TryDecode` + 逐行预乘）、`IImageProcessingContext` 链式糖、端到端测试（PNG 素材现造）。**公开 API 不含编码**：`PngWriter` 由调用方直接用（测试即如此）。M5 已落地：`IPen`/`Pen`、`StrokeOutline`（线段四边形 ∪ 顶点圆盘，统一绕向走 NonZero 并集）、`DrawingContext.Draw`、变换栈（`PushTransform`/`SetTransform`/`ResetTransform`）、`TextDrawing.GetTextPath`、`DrawText` 在非恒等变换下自动改走轮廓路径、samples 示例工程（无素材依赖，`PngWriter` 输出 `output/result.png`）。M7 已落地：`PushClip`/`PopClip`（画布大小 A8 掩码栈，填充/描边/文字三条路径统一走 `BlendCoverage`）、渐变与图案笔刷跟随变换（逆矩阵采样 + 不可变副本）、BenchmarkDotNet 基准工程（填充/描边/文字/编解码/端到端）、NativeAOT smoke 工程（`PublishAot`，win-x64 自包含 9.8 MB，输出哈希与 JIT 一致）。M6 已落地：`LineJoin`（Miter/Bevel/Round）与 `LineCap`（Butt/Round/Square）、`MiterLimit` 超限退回 bevel、`DashPattern`/`DashOffset`（线宽倍数，闭合路径跨起点合并，整圈实线退化为闭合描边），样式通过 `IPen` 默认成员保持向后兼容。剩余：0.2 的混合模式与图层。M0 实际未做 CI（仓库尚无远端），其余按计划落地。
 
 ---
 
@@ -656,7 +667,7 @@ image.Mutate(x => x
 
 **功能**
 
-- `dotnet run --project samples/ImgProcSharp.Samples` 生成 `output/result.png`（用 `PngWriter` 写出）：渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字，肉眼可验，无错误像素。
+- `dotnet run --project samples/ImgProcSharp.Samples` 生成 `output/result.png`（用 `PngWriter` 写出）：渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线，肉眼可验，无错误像素。
 - `Image.Load("x.png").Mutate(x => x.Resize(...).Fill(...).Draw(...).DrawText(...))` 跑通，`Image.Clone()` 出来的图画布互不影响。
 - **解码保真**：`PngWriter` 写出的 PNG 经 `Image.Load` 回到 `Canvas`，与原始像素逐通道相差 ≤ 1（直通→预乘→直通在 `a<255` 时的量化误差），全不透明时逐字节相同。
 - **方向**：带 EXIF 方向的图 `Orientation` 与文件一致；`ApplyOrientation()` 后画布按 `dst(dx,dy) = src(dy, H-1-dx)`（90° CW）等规则转正，再次调用不改变像素。
@@ -673,12 +684,13 @@ image.Mutate(x => x
 - 文字验收：`DrawText`（字形掩码）与 `FillText`（轮廓光栅化）两条路径的墨迹包围盒对齐 ±3 px，墨水量比值在 0.6–1.5 之间（hinting 造成的固有差异）；`MeasureText` 与逐字形前进宽度之和相差 < 0.01 px；折行后每行宽度 ≤ `MaxWidth`；对齐偏移符合 `(MaxWidth - 行宽) × {0, 0.5, 1}`。
 - `RowBlender` 在 AVX2 / SSE / 标量三档输出逐字节一致。
 - 水平/垂直线、整像素对齐矩形的边缘 100% 覆盖，无灰边。
-- **描边**：宽 w、长 L 的水平线，内部行整行覆盖（wa=255），外侧 `floor(y+w/2)+2` 起全白；端点/顶点外侧距端点 `w/2 - 1` 内为实色、`w/2 + 2` 外为空白（证明圆头/圆角生效，而不是方头）；闭合方形描边中心保持原色。
+- **描边**：宽 w、长 L 的水平线，内部行整行覆盖（wa=255），外侧 `floor(y+w/2)+2` 起全白；闭合方形描边中心保持原色。端点/连接按样式分别验收：`Round` 端帽在距端点 `w/2 - 1` 内有墨水、`w/2 + 2` 外全白；`Butt` 在 `x < 端点` 处无墨水；`Square` 在 `端点 + w/2` 内为实色；90° 折线上 `Miter` 的尖角伸到 `r·√2`（`r·1.2` 处有墨水），`Bevel`/`Round` 在 `r + 1` 外全白；`MiterLimit < 1/sin(θ/2)` 时必须退回 bevel。
+- **虚线**：线宽 4、图案 `[10, 10]` 的水平线，`[0,40)` 实、`[40,80)` 虚、`[80,120)` 实……；`DashOffset` 整体平移一个相位；线宽翻倍时实/虚段同比翻倍（图案单位是线宽倍数）；闭合方形四条边都出现缺口；图案长于周长时退化为与实线描边逐像素一致。
 - **变换**：`PushTransform(translate)` 后填充矩形落在平移后的位置，原位置保持空白；`translate ∘ rotate(90°)` 的落点符合「先旋转再平移」；`ResetTransform` 后恢复恒等；`PushTransform(scale(2))` 下 `Pen.Width=5` 实际覆盖 10 px；缩放 2 倍的文字墨迹包围盒与未缩放时成 2 倍关系（±3 px）。
 - **裁剪**：`PushClip` 矩形后填充整张画布，掩码外逐像素保持原色；两层裁剪的交集只有 `min` 区域可见；斜边上的中间值数量 > 20（掩码本身带 AA）；裁剪掩码同样吃当前变换（平移后可见区跟着平移）。
 - **笔刷跟随变换**：`scale(2,1)` 下画布 `x=2u` 的颜色等于未缩放时 `x=u`（±3）；旋转 90° 后线性渐变从横向变成纵向；`PatternBrush` 平移后平铺相位跟着平移；用过的笔刷对象本身不被改写（同一实例在恒等变换下仍是原样）。
 - **基准与 AOT**：`dotnet run -c Release --project benchmarks/ImgProcSharp.Benchmarks -- --filter "*"` 能跑出表格（`ShortRunJob`）；`dotnet publish samples/ImgProcSharp.AotSmoke -c Release -r win-x64` 后运行 exe，输出与 `dotnet run` 逐字节相同。
-- **已知差距**（不算失败，写在这里避免误解）：描边只有圆角连接 + 圆头端点（Miter/Bevel/Dash 在 0.2）；裁剪不做软裁剪（掩码直接乘 coverage），也不支持「反裁剪」；笔刷变换对自定义 `GradientBrush` 派生类无效（内置的线性/径向/图案都跟随）。
+- **已知差距**（不算失败，写在这里避免误解）：非等比缩放下笔尖仍按几何平均取圆笔尖（不生成椭圆笔尖）；虚线只在 flatten 之后的折线上按弧长切分，极端密集的曲线（弦长 ≪ 虚线段长）会有亚像素级的段长误差；裁剪不做软裁剪（掩码直接乘 coverage），也不支持「反裁剪」；笔刷变换对自定义 `GradientBrush` 派生类无效（内置的线性/径向/图案都跟随）。
 
 **工程**
 
@@ -701,7 +713,7 @@ image.Mutate(x => x
 | 调用方拿不到「一键存图」 | 需要多写两行 | `Canvas.CopyToStraight` + `PngWriter.Encode` 就是四行；v1 明确不承诺输出编码，避免为多格式输出背兼容责任 |
 | 预乘 vs 直通 alpha 决策 | 影响所有混合内核与边界代码 | 已在 §6.1 定为预乘，M0 定稿后不再改 |
 | GlyphRaster 只有二次贝塞尔、整数笔位 | 旋转/缩放文字必须走路径慢路径 | 慢路径在 M3 就实现（`GetTextPaths` 已具备） |
-| 描边的工作量易失控（join/dash/自交/退化） | 排期风险 | v1 只做「圆头端点 + 圆角连接」（`StrokeOutline`），Miter/Bevel/Square/Dash 整体推到 0.2 的 M6 |
+| 描边的工作量易失控（join/dash/自交/退化） | 排期风险 | 先用「圆头端点 + 圆角连接」打通（`StrokeOutline`），M6 再补 Miter/Bevel/Square/Dash；实际落地时几何部分只多出「外侧法向 + 闭式 miter 交点」和「按弧长切段」两块，没有引入新的光栅化路径 |
 | 内嵌字体 2.0 MB | 包体积 | v1 接受；后续可拆 `ImgProcSharp.Fonts`（misc §E） |
 | 色彩管理缺失 | 带 ICC 的图（Display P3）颜色会偏 | v1 明确记录为已知限制（misc §K），README 写清 |
 
