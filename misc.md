@@ -391,7 +391,7 @@ byte[] jpg = JpegEncoder.Encode(straight, canvas.Width, canvas.Height, 4, new Jp
 |---|---|---|---|
 | **PNG** | 中 | 全平台原生 | 矢量海报与对比拼图用它（`result.png`、`compare.png`），`PngWriter` 一行 |
 | BMP | 大 | 全平台 | 32 bpp 无压缩，示例图能到几 MB，不选 |
-| **JPEG** | 小 | 全平台 | 照片管线用它（`photo.jpg`）；有损压缩会放大描边锯齿，正好当「肉眼验收」的对照，与原图并排拼在 `compare.png` 里对比 |
+| **JPEG** | 小 | 全平台 | 照片管线用它（`photo.jpg`），拼图的 JPG 版（`compare.jpg`）则当 README 首页预览；有损压缩会放大描边锯齿，正好当「肉眼验收」的对照，与原图并排拼在一张图里对比 |
 
 ### 用法与注意点
 

@@ -34,7 +34,7 @@
 |---|---|
 | `ImgProcSharp`（NuGet，net10.0） | 唯一对外发布的包。内含绘图核心源码 + GlyphRaster 源码 + 内嵌字体 + 解码桥；`Sdcb.SimdCodecs` 只用于解码，编码不进包 |
 | `ImgProcSharp.Core`（net8.0;net10.0） | 开发与测试用工程，`IsPackable=false`，不单独发布（方案 A） |
-| `samples/ImgProcSharp.Samples` | 控制台示例：矢量海报 → `output/result.png`；照片管线（JPEG 解码 → 标注 → 编码）→ `output/photo.jpg` + 原图/成品对比拼图 `output/compare.png` |
+| `samples/ImgProcSharp.Samples` | 控制台示例：矢量海报 → `output/result.png`；照片管线（JPEG 解码 → 标注 → 编码）→ `output/photo.jpg` + 原图/成品对比拼图 `output/compare.png|jpg`（JPG 版复制到 `docs/compare.jpg` 作 README 首页图） |
 | `tests/ImgProcSharp.Core.Tests`（net8+net10） | 几何、光栅化、混合、文字 |
 | `tests/ImgProcSharp.SimdCodecs.Tests`（net10） | 端到端解码 → 绘制：像素保真、格式识别、Exif 方向、链式 `Mutate`（PNG 素材用 `PngWriter` 现造） |
 
@@ -78,10 +78,12 @@ f:/code/ImgProcSharp/
     ImgProcSharp.Core.Tests/       # net8.0;net10.0，内核与算法
     ImgProcSharp.SimdCodecs.Tests/ # net10.0，端到端（M4 起）
   samples/
-    ImgProcSharp.Samples/          # net10.0 示例，输出 result.png + photo.jpg + compare.png
+    ImgProcSharp.Samples/          # net10.0 示例，输出 result.png + photo.jpg + compare.png/jpg
     ImgProcSharp.AotSmoke/         # net10.0 + PublishAot，输出必须与 JIT 逐字节一致
   benchmarks/
     ImgProcSharp.Benchmarks/       # BenchmarkDotNet（填充/描边/文字/编解码）
+  docs/
+    compare.jpg                    # README 首页预览图（示例 output/compare.jpg 的副本）
 ```
 
 已完成（截至 M7 + 0.2 渐变优化，Core 199 个用例 ×2 目标框架 + ext 16 个用例，全绿）：
@@ -220,7 +222,7 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 
 1. `RenderPoster()`——整张图由代码画出来（渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线），`PngWriter` 写到 `output/result.png`。
 2. `RenderPhoto()`——`BuildSamplePhoto()` 合成一张 1280×720 的照片并用 `JpegEncoder` 编码成真 JPEG 字节（存在 `samples/assets/sample.jpg` 时优先读它），`Image.Load` 解码 → 顶部压暗渐变 / 虚线高亮 / 引线 / 信息卡 / 旋转徽章 / 暗角 → `Canvas.CopyToStraight` 后 `JpegEncoder.Encode` 写 `output/photo.jpg`。
-3. `RenderComparison()`——解码后先 `Image.Clone()` 留一份原图，处理完用 `Canvas.GetRow` 把两张图逐行拷进一张 2580×784 的拼图（顶部标签条 + 中间分隔线 + 外框，行内预乘像素直接搬），`PngWriter` 写 `output/compare.png`，一眼就能看出哪些是画上去的。
+3. `RenderComparison()`——解码后先 `Image.Clone()` 留一份原图，处理完用 `Canvas.GetRow` 把两张图逐行拷进一张 2580×784 的拼图（顶部标签条 + 中间分隔线 + 外框，行内预乘像素直接搬），`PngWriter` 写 `output/compare.png`、`JpegEncoder` 写 `output/compare.jpg`（README 首页那张即它的副本 `docs/compare.jpg`），一眼就能看出哪些是画上去的。
 
 `dotnet run --project samples/ImgProcSharp.Samples` 一条命令即可复现，肉眼就能验 AA、渐变脏边、中文缺字、描边接缝、miter 尖角与虚线、旋转文字锯齿、裁剪边界，以及「解码 → 绘制 → 编码」整条链。
 
@@ -676,7 +678,7 @@ image.Mutate(x => x
 **功能**
 
 - `dotnet run --project samples/ImgProcSharp.Samples` 生成 `output/result.png`（`PngWriter`）：渐变背景 + 圆角卡片 + 中英文排版 + 裁剪条纹带 + 圆环描边 + 旋转徽章 + 描边文字 + miter 尖角 + 虚线，肉眼可验，无错误像素。
-- 同一条命令生成 `output/photo.jpg` 与 `output/compare.png`：`JpegEncoder` 造出真 JPEG 素材 → `Image.Load` 解码 → 叠加渐变/虚线/文字/旋转徽章 → `JpegEncoder.Encode` 写回，并把原图与成品左右拼成一张对比图，证明「解码 → 绘制 → 编码」闭环可用。
+- 同一条命令生成 `output/photo.jpg` 与 `output/compare.png` / `compare.jpg`：`JpegEncoder` 造出真 JPEG 素材 → `Image.Load` 解码 → 叠加渐变/虚线/文字/旋转徽章 → `JpegEncoder.Encode` 写回，并把原图与成品左右拼成一张对比图，证明「解码 → 绘制 → 编码」闭环可用（README 首页展示的就是 `docs/compare.jpg`）。
 - `Image.Load("x.png").Mutate(x => x.Resize(...).Fill(...).Draw(...).DrawText(...))` 跑通，`Image.Clone()` 出来的图画布互不影响。
 - **解码保真**：`PngWriter` 写出的 PNG 经 `Image.Load` 回到 `Canvas`，与原始像素逐通道相差 ≤ 1（直通→预乘→直通在 `a<255` 时的量化误差），全不透明时逐字节相同。
 - **方向**：带 EXIF 方向的图 `Orientation` 与文件一致；`ApplyOrientation()` 后画布按 `dst(dx,dy) = src(dy, H-1-dx)`（90° CW）等规则转正，再次调用不改变像素。

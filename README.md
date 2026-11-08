@@ -2,6 +2,10 @@
 
 Drawing for [Sdcb.SimdCodecs](https://www.nuget.org/packages/Sdcb.SimdCodecs): read an image, draw shapes / gradients / strokes / TrueType text on it, write it back as PNG or JPEG. Pure managed, no native dependency, AOT-compatible.
 
+![示例输出：左为 JPEG 解码后的原图，右为在同一份像素上叠加压暗渐变、虚线高亮、中文文字与旋转徽章后的成品](docs/compare.jpg)
+
+<sub>`dotnet run --project samples/ImgProcSharp.Samples` 的产物，左右并排对比（`docs/compare.jpg`，由 `output/compare.jpg` 复制而来）。</sub>
+
 ```csharp
 using ImgProcSharp;
 using Sdcb.SimdCodecs.Jpeg;
@@ -120,7 +124,7 @@ image.Mutate(x => x
 dotnet run --project samples/ImgProcSharp.Samples
 # → output/result.png（960×540 矢量海报：渐变背景、圆角卡片、中英文排版、裁剪条纹带、圆环描边、旋转徽章、描边文字、miter 尖角与虚线）
 # → output/photo.jpg（1280×720 照片管线：JPEG 解码 → 渐变压暗 / 虚线高亮 / 信息卡 / 旋转徽章 → 编码回 JPEG）
-# → output/compare.png（原图与处理后左右拼一张对比图，2580×784）
+# → output/compare.png / compare.jpg（原图与处理后左右拼一张对比图，2580×784；首页那张就是它的 JPG 版）
 
 dotnet run -c Release --project benchmarks/ImgProcSharp.Benchmarks -- --filter "*Stroke*"
 # 填充/描边/文字/编解码/端到端；ShortRunJob，十几秒出数，正式数据加 --job default
@@ -137,10 +141,11 @@ dotnet publish samples/ImgProcSharp.AotSmoke -c Release -r win-x64
 ```
 src/ImgProcSharp.Core/               绘图核心（net8.0;net10.0，不发布）
 src/ImgProcSharp.SimdCodecs/         唯一打包工程（net10.0，程序集名 ImgProcSharp）
-samples/ImgProcSharp.Samples/        示例控制台（net10.0，输出 result.png / photo.jpg / compare.png）
+samples/ImgProcSharp.Samples/        示例控制台（net10.0，输出 result.png / photo.jpg / compare.png|jpg）
 samples/ImgProcSharp.AotSmoke/       NativeAOT 冒烟（PublishAot，输出与 JIT 一致）
 benchmarks/ImgProcSharp.Benchmarks/  BenchmarkDotNet 基准
 tests/                               Core.Tests（net8.0;net10.0）+ SimdCodecs.Tests（net10.0）
+docs/                                README 首页预览图（compare.jpg，示例产物的副本）
 ```
 
 核心源码通过 `Compile Include` 编进打包程序集，因此只发一个 dll、一个包。

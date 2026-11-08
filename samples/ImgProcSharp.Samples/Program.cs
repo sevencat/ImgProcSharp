@@ -337,6 +337,17 @@ internal static class Program
         byte[] straight = new byte[sheet.Width * sheet.Height * 4];
         sheet.Canvas.CopyToStraight(straight, sheet.Width * 4);
         Write(PngWriter.Encode(straight, sheet.Width, sheet.Height), "compare.png", sheet.Width, sheet.Height);
+
+        // README 首页展示的就是这张：JPEG 体积小，适合放进仓库当预览图
+        Write(
+            JpegEncoder.Encode(straight, sheet.Width, sheet.Height, 4, new JpegEncodeOptions
+            {
+                Quality = 90,
+                OptimizeHuffman = true,
+            }),
+            "compare.jpg",
+            sheet.Width,
+            sheet.Height);
     }
 
     /// <summary>
