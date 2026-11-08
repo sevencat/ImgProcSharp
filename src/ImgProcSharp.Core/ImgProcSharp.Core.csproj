@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <LangVersion>12.0</LangVersion>              <!-- 与 GlyphRaster 对齐，保证 net8 也编得过 -->
+    <AssemblyName>ImgProcSharp.Core</AssemblyName>
+    <RootNamespace>ImgProcSharp</RootNamespace>
+    <IsPackable>false</IsPackable>               <!-- 只作为源码载体，永不发布 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Text\Fonts\WenQuanYiMicroHei.ttf.gz"
+                      LogicalName="ImgProcSharp.Text.Fonts.WenQuanYiMicroHei.ttf.gz" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ImgProcSharp.Core.Tests" />
+  </ItemGroup>
+
+</Project>

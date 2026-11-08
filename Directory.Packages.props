@@ -1,0 +1,18 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只用于解码；输出 PNG 由调用方直接用它的 PngWriter（misc §B / §Q） -->
+    <PackageVersion Include="Sdcb.SimdCodecs" Version="1.4.0" />
+
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.2" />
+
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ImgProcSharp.Core/ImgProcSharp.Core.csproj" />
+    <Project Path="src/ImgProcSharp.SimdCodecs/ImgProcSharp.SimdCodecs.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ImgProcSharp.Core.Tests/ImgProcSharp.Core.Tests.csproj" />
+    <Project Path="tests/ImgProcSharp.SimdCodecs.Tests/ImgProcSharp.SimdCodecs.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/ImgProcSharp.Samples/ImgProcSharp.Samples.csproj" />
+    <Project Path="samples/ImgProcSharp.AotSmoke/ImgProcSharp.AotSmoke.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/ImgProcSharp.Benchmarks/ImgProcSharp.Benchmarks.csproj" />
+  </Folder>
+</Solution>

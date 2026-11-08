@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+TestResults/
+artifacts/
+output/
+samples/output/
+*.binlog
+BenchmarkDotNet.Artifacts/

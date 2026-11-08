@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>   <!-- 与 Sdcb.SimdCodecs 1.4.0 一致 -->
+    <AssemblyName>ImgProcSharp</AssemblyName>
+    <RootNamespace>ImgProcSharp</RootNamespace>
+    <PackageId>ImgProcSharp</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Drawing for Sdcb.SimdCodecs: shapes, gradients, strokes and TrueType text over decoded pixels, with no native dependency. AOT-compatible.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>drawing;graphics;skia-free;image;simd;decoding</PackageTags>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <!-- 把核心源码编进本程序集（不是引用 dll）：见 plan §4.2 -->
+  <ItemGroup>
+    <Compile Include="..\ImgProcSharp.Core\**\*.cs"
+             Exclude="..\ImgProcSharp.Core\bin\**;..\ImgProcSharp.Core\obj\**"
+             Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\ImgProcSharp.Core\Text\Fonts\WenQuanYiMicroHei.ttf.gz"
+                      LogicalName="ImgProcSharp.Text.Fonts.WenQuanYiMicroHei.ttf.gz"
+                      Link="Core\Text\Fonts\WenQuanYiMicroHei.ttf.gz" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\ImgProcSharp.Core\Text\Fonts\LICENSE-WenQuanYiMicroHei.txt"
+          Pack="true" PackagePath="licenses\" Visible="false" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ImgProcSharp.SimdCodecs.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Sdcb.SimdCodecs" />
+  </ItemGroup>
+
+</Project>
