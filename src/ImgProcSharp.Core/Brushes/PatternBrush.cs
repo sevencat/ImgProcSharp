@@ -84,17 +84,30 @@ public sealed class PatternBrush : IBrush
             }
 
             int tileY = Mod(absoluteY - _originY, _tileHeight) * _tileWidth * Canvas.BytesPerPixel;
+            int tileRowBytes = _tileWidth * Canvas.BytesPerPixel;
 
-            for (int i = 0, o = 0; i < coverageRow.Length; i++, o += Canvas.BytesPerPixel)
+            // 行内瓦片索引是「从起点递增、到边界回绕」：起步取一次模，之后按瓦片内连续段整段混合，
+            // 段内不必逐像素取模，也能让内核一次处理多个像素。
+            int tileX = Mod(region.X - _originX, _tileWidth) * Canvas.BytesPerPixel;
+            int i = 0;
+            int o = 0;
+
+            while (i < coverageRow.Length)
             {
-                byte c = coverageRow[i];
-                if (c == 0)
-                {
-                    continue;
-                }
+                int pixels = Math.Min(coverageRow.Length - i, (tileRowBytes - tileX) / Canvas.BytesPerPixel);
 
-                int tileX = Mod(region.X + i - _originX, _tileWidth) * Canvas.BytesPerPixel;
-                BlendPixel(row, o, tileY + tileX, c);
+                RowBlender.OverPattern(
+                    row.Slice(o, pixels * Canvas.BytesPerPixel),
+                    _tile.AsSpan(tileY + tileX, pixels * Canvas.BytesPerPixel),
+                    coverageRow.Slice(i, pixels));
+
+                i += pixels;
+                o += pixels * Canvas.BytesPerPixel;
+                tileX += pixels * Canvas.BytesPerPixel;
+                if (tileX == tileRowBytes)
+                {
+                    tileX = 0;
+                }
             }
         }
     }

@@ -142,11 +142,21 @@ public static class PixelOps
     public static byte[] ToBgra32(Canvas canvas)
     {
         ArgumentNullException.ThrowIfNull(canvas);
+
         var result = new byte[canvas.Width * canvas.Height * 4];
+        bool opaque = canvas.IsFullyOpaque();
         for (int y = 0; y < canvas.Height; y++)
         {
             ReadOnlySpan<byte> src = canvas.GetRow(y);
             Span<byte> dst = result.AsSpan(y * canvas.Width * 4, canvas.Width * 4);
+
+            if (opaque)
+            {
+                // 不透明时直通值就是预乘值，只剩 R/B 互换，连除法都不用
+                SwapRedBlue(src, dst);
+                continue;
+            }
+
             for (int x = 0, o = 0; x < canvas.Width; x++, o += 4)
             {
                 byte a = src[o + 3];
@@ -164,11 +174,20 @@ public static class PixelOps
     public static byte[] ToRgb24(Canvas canvas)
     {
         ArgumentNullException.ThrowIfNull(canvas);
+
         var result = new byte[canvas.Width * canvas.Height * 3];
+        bool opaque = canvas.IsFullyOpaque();
         for (int y = 0; y < canvas.Height; y++)
         {
             ReadOnlySpan<byte> src = canvas.GetRow(y);
             Span<byte> dst = result.AsSpan(y * canvas.Width * 3, canvas.Width * 3);
+
+            if (opaque)
+            {
+                StripAlpha(src, dst);
+                continue;
+            }
+
             for (int x = 0, s = 0, d = 0; x < canvas.Width; x++, s += 4, d += 3)
             {
                 byte a = src[s + 3];
@@ -185,11 +204,24 @@ public static class PixelOps
     public static byte[] ToGray8(Canvas canvas)
     {
         ArgumentNullException.ThrowIfNull(canvas);
+
         var result = new byte[canvas.Width * canvas.Height];
+        bool opaque = canvas.IsFullyOpaque();
         for (int y = 0; y < canvas.Height; y++)
         {
             ReadOnlySpan<byte> src = canvas.GetRow(y);
             Span<byte> dst = result.AsSpan(y * canvas.Width, canvas.Width);
+
+            if (opaque)
+            {
+                for (int x = 0, s = 0; x < canvas.Width; x++, s += 4)
+                {
+                    dst[x] = (byte)(((src[s] * 77) + (src[s + 1] * 150) + (src[s + 2] * 29)) >> 8);
+                }
+
+                continue;
+            }
+
             for (int x = 0, s = 0; x < canvas.Width; x++, s += 4)
             {
                 byte a = src[s + 3];
@@ -201,5 +233,61 @@ public static class PixelOps
         }
 
         return result;
+    }
+
+    /// <summary>RGBA → RGB 的剔除 alpha：4 像素 16 字节压成 12 字节。</summary>
+    private static void StripAlpha(ReadOnlySpan<byte> src, Span<byte> dst)
+    {
+        Vector128<byte> pack = Vector128.Create(
+            (byte)0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 0xFF, 0xFF, 0xFF, 0xFF);
+
+        ref byte s = ref MemoryMarshal.GetReference(src);
+        ref byte d = ref MemoryMarshal.GetReference(dst);
+
+        int i = 0;
+        int o = 0;
+
+        // 一次写 16 字节但只有 12 字节有效，所以尾部至少留 4 字节给标量
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 20 <= src.Length; i += 16, o += 12)
+            {
+                Vector128.StoreUnsafe(Vector128.Shuffle(Vector128.LoadUnsafe(ref s, (nuint)i), pack), ref d, (nuint)o);
+            }
+        }
+
+        for (; i < src.Length; i += 4, o += 3)
+        {
+            dst[o] = src[i];
+            dst[o + 1] = src[i + 1];
+            dst[o + 2] = src[i + 2];
+        }
+    }
+
+    /// <summary>RGBA → BGRA 的通道互换：4 像素一条 shuffle。</summary>
+    private static void SwapRedBlue(ReadOnlySpan<byte> src, Span<byte> dst)
+    {
+        Vector128<byte> swap = Vector128.Create(
+            (byte)2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15);
+
+        ref byte s = ref MemoryMarshal.GetReference(src);
+        ref byte d = ref MemoryMarshal.GetReference(dst);
+
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 16 <= src.Length; i += 16)
+            {
+                Vector128.StoreUnsafe(Vector128.Shuffle(Vector128.LoadUnsafe(ref s, (nuint)i), swap), ref d, (nuint)i);
+            }
+        }
+
+        for (; i < src.Length; i += 4)
+        {
+            dst[i] = src[i + 2];
+            dst[i + 1] = src[i + 1];
+            dst[i + 2] = src[i];
+            dst[i + 3] = src[i + 3];
+        }
     }
 }

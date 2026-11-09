@@ -1,6 +1,15 @@
 # ImgProcSharp
 
+[![NuGet](https://img.shields.io/nuget/v/Sevencat.ImgproSharp.svg)](https://www.nuget.org/packages/Sevencat.ImgproSharp)
+[![Downloads](https://img.shields.io/nuget/dt/Sevencat.ImgproSharp.svg)](https://www.nuget.org/packages/Sevencat.ImgproSharp)
+
 Drawing for [Sdcb.SimdCodecs](https://www.nuget.org/packages/Sdcb.SimdCodecs): read an image, draw shapes / gradients / strokes / TrueType text on it, write it back as PNG or JPEG. Pure managed, no native dependency, AOT-compatible.
+
+NuGet: <https://www.nuget.org/packages/Sevencat.ImgproSharp>
+
+```
+dotnet add package Sevencat.ImgproSharp
+```
 
 ![示例输出：左为 JPEG 解码后的原图，右为在同一份像素上叠加压暗渐变、虚线高亮、中文文字与旋转徽章后的成品](docs/compare.jpg)
 
@@ -36,7 +45,7 @@ File.WriteAllBytes(
 
 - 输入：`Sdcb.SimdCodecs` 1.4.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm）。
 - 输出：**本库不提供 `Save`**。PNG 用 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 用 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（都在 1.4.0 里，随元包传递引用）；其余格式（WebP 等）等 0.2（见 `plan.md` §Q）。
-- 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`）。
+- 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`；默认解码走直写，ICC 尽力而为，需要保证时用 `ImageDecodeOptions.RequireIccProfile`）。
 - 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（Miter/Bevel/Round 连接、Butt/Round/Square 端点、`MiterLimit`、虚线）、`Matrix3x2` 变换（笔刷、线宽与虚线同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
 - 文字：内嵌文泉驿微米黑（2 MB gzip），无 kerning / 无 GSUB / 无双向文本 / 无彩色 emoji。
 - 还没做（0.2）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。

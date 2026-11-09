@@ -158,8 +158,9 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>ImgProcSharp</AssemblyName>
     <RootNamespace>ImgProcSharp</RootNamespace>
-    <PackageId>ImgProcSharp</PackageId>
+    <PackageId>Sevencat.ImgproSharp</PackageId>
     <Version>0.1.0</Version>
+    <Authors>sevencat</Authors>
     <Description>Drawing for Sdcb.SimdCodecs: shapes, gradients, strokes and TrueType text over decoded pixels, with no native dependency. AOT-compatible.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -234,10 +235,11 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 
 ```
 Image.Load("in.jpg")                              [ext: ImageDecoderBridge]
-  └─ SimdCodecs.TryReadInfo(data, out ImageInfo info)      // 1.4.0 门面：格式 / 尺寸 / 方向
-  └─ SimdCodecs.TryDecode(data, out IDecodedImage dec)
-  └─ dec.IccProfile / dec.ToRgba8()
-  └─ 逐行 premultiply → Canvas(预乘 Rgba32) → Image
+  ├─ 默认：TryReadInfo → TryDecodeInto(画布缓冲, Rgba32) → 逐行 premultiply
+  │    └─ ICC 尽力而为：JPEG 读 APP2 段；PNG/WebP 拿不到就留空
+  └─ RequireIccProfile=true：TryReadInfo → TryDecode → dec.IccProfile
+       └─ PixelConverter.TryConvert 逐行进 Canvas → 逐行 premultiply
+  └─ Canvas(预乘 Rgba32) → Image
 
 image.Mutate(x => x.Resize(...).Fill(brush, path).DrawText(options, text, at))   [ext → core]
   └─ DrawingContext: clip → 路径 flatten → ScanlineRasterizer → A8 coverage
@@ -641,8 +643,8 @@ image.Mutate(x => x
 **实现要点**
 
 - 解码（`ImageDecoderBridge.cs`，唯一接触 SimdCodecs 的文件）：
-  `SimdCodecs.TryReadInfo` 取 `Format`/`Orientation`/尺寸 → `SimdCodecs.TryDecode` → `dec.ToRgba8()`（4 通道 RGBA8、紧密排列）→ 逐行 `PixelOps.PremultiplyInPlace` 写进 `Canvas`。
-  两次调用各扫一遍文件头，代价可忽略；比 2.0 的 `ImageDecoder.Open + CopyPixels` 多一次整图拷贝（12 MP 约 5–10 ms），v1 接受；升级点见 misc §B。
+  `SimdCodecs.TryReadInfo` 取 `Format`/`Orientation`/尺寸，然后两条路径：默认 `SimdCodecs.TryDecodeInto(data, canvas.Buffer, canvas.Stride, ImagePixelFormat.Rgba32)`，解码器直接把像素写进画布，连解码器自己的输出数组都不要；`ImageDecodeOptions.RequireIccProfile = true` 时改用 `TryDecode` 拿到 `IDecodedImage`（有 `IccProfile`），再 `PixelConverter.TryConvert` 逐行转进画布。两条路径最后都逐行 `PixelOps.PremultiplyInPlace` 把直通变预乘。
+  默认路径的 ICC 是尽力而为：`TryDecodeInto` 不返回 ICC，但 JPEG 能用 `JpegDecoder.TryReadIccProfile` 只扫 APP2 段补上；PNG 的 `PngReader.ReadHeader` 在 1.4 是 internal、WebP 的 ICCP 也得先解码，这两者默认留空。解码器拒绝目标格式或拒绝 8 位投影时自动回退慢路径；实测见 §12.2-6。
 - 编码：公开 API 里没有。PNG 直接 `PngWriter.Encode(straight, w, h)`、JPEG 直接 `JpegEncoder.Encode(straight, w, h, 4, options)`（直通缓冲用 `Canvas.CopyToStraight` 拿），各一行代码；这样发布的 dll 里没有 zlib/CRC/DCT，也不用背编码器的兼容性责任。用法见 misc §Q。
 - 方向：1.4.0 的 `TryReadInfo` 已给出 `ImageInfo.Orientation`，不必自己解析 EXIF APP1。`ApplyOrientation()` 应用后把 `Orientation` 归位 `Normal`，因此重复调用无副作用（幂等，有测试）。
 - `Mutate` 的 `Resize` 会**替换并释放**旧画布，并把同一个 `DrawingContext` 重绑到新画布（`Transform` 保留）；其它方法只是薄封装，不引入额外状态。
@@ -751,14 +753,15 @@ image.Mutate(x => x
 |---|---|---|---|
 | `PremultiplyInPlace`（标量） | 38.7 ms | 18.7 ns | 解码路径 |
 | `PremultiplyInPlace`（`Vector128` 原型） | 9.5 ms | 4.8 ns | 4×，逐字节相同 |
-| `CopyToStraight` | 5.6 ms | 2.7 ns | 每像素 3 次整数除法 |
+| `CopyToStraight`（半透明） | 5.6 ms | 2.7 ns | 每像素 3 次整数除法 |
+| `CopyToStraight`（不透明） | 0.58 ms | 0.28 ns | `IsFullyOpaque` 后整块 memcpy；此前 3.12 ms |
 | `Unpremultiply(src,dst)` | 10.6 ms | 5.1 ns | 同上，多一次缓冲 |
-| `IsFullyOpaque` | 0.93 ms | 0.45 ns | 逐字节扫描 |
-| `FlipHorizontal` | 0.96 ms | 0.48 ns | 逐像素 4 字节交换 |
-| `Rotate90` | 7.0 ms | 3.4 ns | 逐像素 4 字节搬移 |
+| `IsFullyOpaque` | 0.27 ms | 0.13 ns | `Vector128` 洗 alpha 通道，接近带宽极限 |
+| `FlipHorizontal` | 0.96 ms | 0.48 ns | 1080p；1024×768 优化后 216 µs（§12.2-11） |
+| `Rotate90` | 7.0 ms | 3.4 ns | 1080p；1024×768 优化后 1.06 ms（§12.2-11） |
 | `Canvas.Clear` | 0.50 ms | 0.24 ns | `uint` 广播填充，接近带宽极限 |
 | `Fill` 纯色矩形全覆盖（优化前） | 5.15 ms | 2.5 ns | 比 `Clear` 慢 10× |
-| `Fill` 线性渐变全覆盖 | 35.2 ms | 17 ns | 当前最大热点 |
+| `Fill` 线性渐变全覆盖 | 35.2 ms | 17 ns | 差分游标后 1024×768 实测 8.5 ms（11.3 ns/px） |
 
 同一进程内的 A/B（预热 1 轮 + 7 轮中位数，可靠性远高于上表）：
 
@@ -770,7 +773,8 @@ image.Mutate(x => x
 | `PremultiplyInPlace`（SIMD） | 1.04 ms | 0.5 ns | 4.5× |
 | `CopyToStraight`（整块 vs 逐行） | 10.80 ms | 0.5 ns | 26.8 → 10.8 ms（2.5×），alpha=180 数据 |
 | `CopyToPremultiplied`（整块） | 0.30 ms | 0.15 ns | 纯 memcpy |
-| `Image.Load` PNG 1080p（直写 vs `ToRgba8`） | 19.7 ms | — | 22.6 → 19.7 ms，峰值少 8.3 MB |
+| `Image.Load` PNG 1080p（默认，`TryDecodeInto` 直写） | 10.9 ms | — | PNG 的 ICC 拿不到（1.4 无 header API）；7.9 MB/次；不透明源再省 1.04 ms 预乘 |
+| `Image.Load` PNG 1080p（`RequireIccProfile=true`） | 16.1 ms | — | 完整解码 + 逐行转换，ICC 保证有；15.8 MB/次 |
 
 ### 12.2 已落地
 
@@ -779,18 +783,33 @@ image.Mutate(x => x
 3. **`PremultiplyInPlace` SIMD 化**：每轮 4 像素，字节加宽到 ushort、alpha 广播到 RGBA、定点除 255、`ConditionalSelect` 还原 alpha、`Narrow` 回字节；非原地的 `Premultiply(src, dst)` 共用同一内核。`a == 255` 不再需要分支（定点结果天然等于原值），尾部走标量。实测 1080p 全图 **4.66 ms → 1.04 ms（4.5×）**；`PremultiplyInPlaceMatchesScalarReference`（1/3/4/5/20/1000 像素）与 `PremultiplyIntoDestinationMatchesInPlace` 守住逐字节一致。
 4. **解码直写画布**：`decoded.ToRgba8()` 每次都分配一整幅 `W*H*4`（1080p 8.3 MB，直接进 LOH）再整图拷进画布。改为 `PixelConverter.TryConvert(decoded, canvas.Buffer, canvas.Stride, ImagePixelFormat.Rgba32)` 逐行转换直接落进画布缓冲；`SampleFormat.Float32` 没有默认的 8 位投影，保留 `ToRgba8` 回退。`decoded` 用 `using IDisposable?` 收口（当前未指定 pool 时可空，换成池化实现后不会泄漏）。实测 1080p PNG 加载 22.6 → 19.7 ms（PNG 解压占大头），峰值少 8.3 MB。`PixelConverterParityTests` 对 1/2/3/4 通道 × UInt8/UInt16 与 `ToRgba8()` 逐字节对拍，并验证 stride 填充不被写脏。
 5. **导出整块化**：`CopyToStraight` / `CopyToPremultiplied` 在 `destinationStride == Stride` 时一次整块进内核。根因不是除法，而是逐行调用让内核的小循环反复重新进入（1080p 1080 次），实测**半透明导出 26.8 → 10.8 ms（2.5×）**，`CopyToPremultiplied` 0.30 ms。带行填充时仍走逐行路径，`CopyToStraightBulkPathMatchesRowByRowPath` 对拍两条路径。
+6. **`TryDecodeInto` 直写成为默认**：`TryDecode` 的解码器输出数组（1080p 8.3 MB）在直写路径下一个字节都不需要——`SimdCodecs.TryDecodeInto(data, canvas.Buffer, canvas.Stride, ImagePixelFormat.Rgba32)` 让 PNG/JPEG 解码器把像素直接写进画布（JPEG 文档称其为 genuine zero-copy decode），之后对带 alpha 的图跑一趟 `PremultiplyInPlace`（不透明图跳过，见第 7 条）。ICC 随之改成尽力而为：`TryDecodeInto` 不返回 ICC，但 1.4 公开了 `JpegDecoder.TryReadIccProfile`（APP2 多段自动拼接），JPEG 只扫文件头就能补上；PNG 的 `PngReader.ReadHeader` 是 internal、WebP 的 ICCP 也要先完整解码，这两者默认留空。需要任何格式的 ICC 时用 `ImageDecodeOptions.RequireIccProfile = true` 回到 `TryDecode` + `TryConvert`；解码器拒绝目标格式或拒绝 8 位投影（cICP PQ/HLG、float32）时也会自动回退。实测 1080p PNG：**16.12 → 10.88 ms，每次分配 15.83 → 7.92 MB**。`DefaultDecodeMatchesFullDecode`（8-bit）与 `DefaultDecodeMatchesFullDecodeFor16BitPng`（16-bit）逐字节对拍两条路径，`PngIccNeedsFullDecode` 与 `DefaultDecodeTakesIccFromJpegHeader` 守住 ICC 语义。
+
+7. **不透明图跳过预乘**：`TryDecodeInto` 写进画布的是直通像素，而 `PremultiplyInPlace` 在 alpha=255 时是恒等变换，此前所有图仍要扫一遍全图（1080p 8.3 MB 读 + 8.3 MB 写，1.04 ms）。改为按来源判断：JPEG 没有 alpha 通道直接跳过；`ImageInfo.Channels` 为 2/4 必定带 alpha 直接预乘；1/3 通道的格式（PNG 的 `tRNS`/palette、GIF 透明索引）先 `IsFullyOpaque()` 实测再决定，避免按格式猜错。`IsFullyOpaque` 同时 SIMD 化：每轮 4 像素把 alpha 洗成连续 16 字节与 255 比对，1080p **0.93 → 0.27 ms**，8.3 MB / 269 µs ≈ 31 GB/s，已到带宽水平。`Premultiply(Canvas)` 在行无 padding 时整块进内核，省掉 1080 次逐行调用。`OpaqueJpegMatchesFullDecode` / `OpaqueRgbPngMatchesFullDecode` 逐字节对拍默认路径与 `RequireIccProfile = true` 路径，`IsFullyOpaqueSeesTransparencyInSimdBody` / `IsFullyOpaqueChecksTailPixels` 守住 SIMD 主体与尾部。
+
+8. **不透明导出走 memcpy**：预乘画布在 alpha=255 时直通值与预乘值相同，`CopyToStraight` 此前仍逐像素 `Unpremultiply`（3 次分支 + 3 次字节写）。现在先 `IsFullyOpaque()`（SIMD，0.27 ms/1080p），全不透明直接转 `CopyToPremultiplied` 整块拷贝：1080p **3.12 → 0.58 ms（5.4×）**。半透明图多付一次 0.27 ms 扫描，相对 5–11 ms 的导出可忽略。`CopyToStraightOpaqueMatchesUnpremultiplyPath` 用 `PixelOps.Unpremultiply` 逐行结果对拍快路径。
+
+9. **半透明满覆盖填充特化**：整行 coverage 恒为 255 时 `a` 就是 `srcA`、源项是常量，每像素从 4 次 `/255` 降到 1 次。新增 `RowBlender.OverSolidFullRow`（`Vector128`，一次 4 像素），`RectangleFill` 的整行全覆盖分支改用它。1024×736 实测 **560 → 235 µs（2.4×）**；`FullRowMatchesGenericFullCoverage`（1/3/4/5/37/100 像素 × 20 组随机数据）与 `OverSolid(dst, color, 全 255)` 逐字节对拍。
+
+10. **图案平铺去掉逐像素取模**：`PatternBrush` 原先每像素一次 `Mod(...)`（`idiv`，~20–40 周期）。瓦片索引在行内是「递增到边界回绕」，改为起步取一次模、之后按瓦片内连续段整段处理，段内走新增的 `RowBlender.OverPattern`（`Vector128`，源与覆盖率都从内存取，复用 `Blend` 内核）。1024×768 平铺实测 **43.0 → 6.8 ms（6.3×）**；`PatternMatchesScalar` 对拍向量/标量两条路径。
+
+11. **整图变换按偏移搬移**：`FlipHorizontal` / `Rotate90` / `Rotate180` / `Rotate270` 的双重循环里每次都调 `GetRow` + `Span.Slice`（等于每像素一次方法调用加边界检查），改为 `MemoryMarshal.GetReference` + `Unsafe.ReadUnaligned<uint>` 直接按 `y * stride + x * 4` 取址，像素按 32 位搬移。1024×768 实测 Flip **246 → 216 µs**、Rotate90 **1433 → 1064 µs**、Rotate180 **707 → 620 µs**；剩余开销是跨行写导致的 cache miss，再往下要分块转置（未做，收益与代码量不成比例）。
+
+12. **导出快路径与通道重排向量化**：`ToBgra32` / `ToRgb24` / `ToGray8` 先 `IsFullyOpaque()`，不透明时免掉每像素 3 次 `Unpremultiply`；BGRA 用一条 shuffle 完成 4 像素 R/B 互换，RGB24 用 shuffle 把 16 字节压成 12 字节（尾部留 4 字节给标量，避免越界写）。1024×768 实测 ToBgra32 **1.62 → 0.62 ms（2.6×）**、ToRgb24 **1.28 → 0.37 ms（3.4×）**、ToGray8 1.17 → 1.01 ms（灰度加权和 SIMD 化性价比低，只做了免除法）。`CopyToStraight` 增加 `bool? assumeOpaque` 重载：`true` 跳过探测、`false` 强制去预乘、`null` 自动判断。
+
+13. **重采样按目标行分带**：中间缓冲原为 `dstW × srcH × 4 float`（4K→1080p 66 MB，直接进 LOH）。改为 8 MB 预算的带：扫一遍 `KernelTable` 求出单行最大窗口，按 `MinSourceRow(destinationY)` 起带、`MaxSourceRow < bandEnd` 收行，累加顺序与整图缓冲完全一致。4K→1080p Lanczos3 实测 **72.1 → 16.9 MB（−77%）**，耗时 133.6 → 133.0 ms（重叠重算 < 5%，被缓存收益抵消）。`BandedMatchesSingleBuffer` 用 `budgetBytes = 0` 强制分带，与 `int.MaxValue` 的单缓冲逐字节对拍。
 
 ### 12.3 待评估（按性价比排序）
 
 | 项 | 现状 | 方案 | 预估 |
 |---|---|---|---|
 | ~~`Unpremultiply` 查表~~ | 已实测否决 | 256×256 `byte` 表（64 KB）替掉每像素 3 次 `idiv` | **负优化**：27.5 vs 10.8 ms；瓶颈不是除法，而是逐行重新进入内核（已由整块调用解决） |
-| `Rotate90` / `FlipHorizontal` | 逐像素 4 字节 | 4×4 块 `Vector128` 转置 / 字节逆序 shuffle | 2–3× |
-| `PatternBrush.Blend` | 每像素 `Mod`（`idiv`） | 按 tile 剩余宽度分段步进，段内索引自增 | 5–10× |
-| 半透明纯色 / 任意覆盖率填充 | 12.6 ns/px | `OverSolid` 每像素 4 次 `Div255`；可对 `sa == 255` 特化（`inverse = 255 - c`）并预乘 `srcPx` | 2–3× |
-| ~~解码入口 `ToRgba8()`~~ | 已落地（见 §12.2-4） | 换 `TryDecodeInto` 会丢掉 `IccProfile`（只有 `IDecodedImage` 带），故改用 `PixelConverter.TryConvert` 逐行直写 | 省 8.3 MB 分配 + 一次整图拷贝 |
-| 渐变混合内核 | 17 ns/px | 2 停特化、覆盖 255 且不透明时跳过 `BlendPixel`、沿 x 颜色增量 | 2–3× |
-| `Resizer` | 中间 float 全图缓冲（4K 近 200 MB） | 按 y 分块 + 两趟 SIMD | 内存优先，速度 2–4× |
+| ~~`Rotate90` / `FlipHorizontal`~~ | 已落地（见 §12.2-11） | ref + 32 位搬移 | 1.2–1.35×，已到 cache 边界 |
+| ~~`PatternBrush.Blend`~~ | 已落地（见 §12.2-10） | 分段步进 + 段内向量内核 | **6.3×** |
+| ~~半透明填充~~ | 已落地（见 §12.2-9） | `OverSolidFullRow` 常量源特化 | **2.4×** |
+| ~~解码入口 `ToRgba8()` / 直写~~ | 已落地（见 §12.2-4/6） | 默认 `TryDecodeInto` 直写；`RequireIccProfile=true` 才走 `TryConvert` | 1080p 16.1 → 10.9 ms，分配少 7.9 MB |
+| ~~`Resizer` 中间缓冲~~ | 已落地（见 §12.2-13） | 8 MB 预算分带 | 4K 分配 −77%，速度不变 |
+| 渐变混合内核 | 11.3 ns/px（1024×768 实测 8.5 ms） | 2 停特化、覆盖 255 且不透明时跳过 `BlendPixel` | 已做过差分游标/预计算倒数；再往下要改 `t` 的逐像素累加顺序，会破坏逐字节一致（§12.4），不做 |
 | `ScanlineRasterizer` | 每子扫描线排序 + 浮点累加 | 定点覆盖 + AET 增量排序 | 中等，改动面大 |
 
 ### 12.4 明确不做

@@ -61,7 +61,8 @@ internal static class RectangleFill
                         continue;
                     }
 
-                    RowBlender.OverSolid(destination, color, full.AsSpan(0, span));
+                    // 半透明纯色整行：覆盖率是常量 255，走少一半除法的专用内核
+                    RowBlender.OverSolidFullRow(destination, color);
                     continue;
                 }
 

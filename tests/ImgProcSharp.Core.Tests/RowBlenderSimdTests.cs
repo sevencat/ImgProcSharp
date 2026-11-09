@@ -57,6 +57,73 @@ public class RowBlenderSimdTests
         Assert.Equal(scalar, dispatched);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(37)]
+    [InlineData(100)]
+    public void FullRowMatchesGenericFullCoverage(int pixels)
+    {
+        var random = new Random(4321 + pixels);
+        byte[] coverage = new byte[pixels];
+        coverage.AsSpan().Fill(255);
+
+        for (int iteration = 0; iteration < 20; iteration++)
+        {
+            var start = new byte[pixels * 4];
+            random.NextBytes(start);
+            MakePremultiplied(start);
+
+            var color = new Color((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256));
+
+            byte[] generic = (byte[])start.Clone();
+            byte[] fast = (byte[])start.Clone();
+            byte[] fastScalar = (byte[])start.Clone();
+
+            RowBlender.OverSolid(generic, color, coverage);
+            RowBlender.OverSolidFullRow(fast, color);
+            RowBlender.OverSolidFullRowScalar(fastScalar, color);
+
+            Assert.Equal(generic, fast);
+            Assert.Equal(generic, fastScalar);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(37)]
+    [InlineData(100)]
+    public void PatternMatchesScalar(int pixels)
+    {
+        var random = new Random(777 + pixels);
+        for (int iteration = 0; iteration < 20; iteration++)
+        {
+            var src = new byte[pixels * 4];
+            random.NextBytes(src);
+            MakePremultiplied(src);
+
+            var start = new byte[pixels * 4];
+            random.NextBytes(start);
+            MakePremultiplied(start);
+
+            var coverage = new byte[pixels];
+            random.NextBytes(coverage);
+
+            byte[] vector = (byte[])start.Clone();
+            byte[] scalar = (byte[])start.Clone();
+
+            RowBlender.OverPattern(vector, src, coverage);
+            RowBlender.OverPatternScalar(scalar, src, coverage);
+
+            Assert.Equal(scalar, vector);
+        }
+    }
+
     /// <summary>把随机像素的 RGB 压到 alpha 以下，保证输入本身就是合法的预乘数据。</summary>
     private static void MakePremultiplied(byte[] pixels)
     {

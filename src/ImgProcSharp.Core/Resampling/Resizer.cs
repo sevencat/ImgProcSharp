@@ -146,7 +146,13 @@ internal static class Resizer
             Math.Max(1, (int)MathF.Round(source.Height * scale)));
     }
 
+    /// <summary>中间缓冲的目标预算；超出就按目标行分带，避免 4K 缩放一次性占几十 MB。</summary>
+    private const int IntermediateBudgetBytes = 8 * 1024 * 1024;
+
     private static Canvas ScaleCore(Canvas source, int width, int height, IResampler sampler)
+        => ScaleCore(source, width, height, sampler, IntermediateBudgetBytes);
+
+    internal static Canvas ScaleCore(Canvas source, int width, int height, IResampler sampler, int budgetBytes)
     {
         if (sampler is NearestNeighbourResampler)
         {
@@ -157,7 +163,19 @@ internal static class Resizer
         KernelTable vertical = KernelTable.Build(source.Height, height, sampler);
 
         int sourceHeight = source.Height;
-        long intermediateLength = (long)width * sourceHeight * Canvas.BytesPerPixel;
+        int rowFloats = width * Canvas.BytesPerPixel;
+
+        // 一条目标行最多要看多少源行：分带至少要装得下它，否则会跨带反复重算
+        int maxWindow = 1;
+        for (int y = 0; y < height; y++)
+        {
+            maxWindow = Math.Max(maxWindow, MaxSourceRow(vertical, y) - MinSourceRow(vertical, y) + 1);
+        }
+
+        int bandRows = Math.Max(1, Math.Min(sourceHeight, budgetBytes / (rowFloats * sizeof(float))));
+        bandRows = Math.Max(bandRows, Math.Min(maxWindow, sourceHeight));
+
+        long intermediateLength = (long)bandRows * rowFloats;
         if (intermediateLength > int.MaxValue)
         {
             throw new InvalidOperationException(
@@ -165,71 +183,86 @@ internal static class Resizer
         }
 
         var intermediate = new float[(int)intermediateLength];
-
-        // 水平趟：每行独立，顺序访问，缓存友好
-        for (int y = 0; y < sourceHeight; y++)
-        {
-            ReadOnlySpan<byte> row = source.GetRow(y);
-            int rowBase = y * width * Canvas.BytesPerPixel;
-            for (int x = 0; x < width; x++)
-            {
-                float r = 0, g = 0, b = 0, a = 0;
-                int start = horizontal.Starts[x];
-                int end = start + horizontal.Counts[x];
-                for (int k = start; k < end; k++)
-                {
-                    int offset = horizontal.Indices[k] * Canvas.BytesPerPixel;
-                    float weight = horizontal.Weights[k];
-                    r += row[offset] * weight;
-                    g += row[offset + 1] * weight;
-                    b += row[offset + 2] * weight;
-                    a += row[offset + 3] * weight;
-                }
-
-                int destination = rowBase + (x * Canvas.BytesPerPixel);
-                intermediate[destination] = r;
-                intermediate[destination + 1] = g;
-                intermediate[destination + 2] = b;
-                intermediate[destination + 3] = a;
-            }
-        }
-
         Canvas result = Canvas.Create(width, height);
 
-        // 垂直趟：按目标行累加中间结果
-        for (int y = 0; y < height; y++)
+        int destinationY = 0;
+        while (destinationY < height)
         {
-            Span<byte> destination = result.GetRow(y);
-            int start = vertical.Starts[y];
-            int end = start + vertical.Counts[y];
+            int bandStart = MinSourceRow(vertical, destinationY);
+            int bandEnd = Math.Min(
+                sourceHeight,
+                Math.Max(bandStart + bandRows, MaxSourceRow(vertical, destinationY) + 1));
 
-            for (int x = 0; x < width; x++)
+            // 水平趟：只算本带，顺序访问，缓存友好
+            for (int y = bandStart; y < bandEnd; y++)
             {
-                float r = 0, g = 0, b = 0, a = 0;
-                for (int k = start; k < end; k++)
+                ReadOnlySpan<byte> row = source.GetRow(y);
+                int rowBase = (y - bandStart) * rowFloats;
+                for (int x = 0; x < width; x++)
                 {
-                    int offset = ((vertical.Indices[k] * width) + x) * Canvas.BytesPerPixel;
-                    float weight = vertical.Weights[k];
-                    r += intermediate[offset] * weight;
-                    g += intermediate[offset + 1] * weight;
-                    b += intermediate[offset + 2] * weight;
-                    a += intermediate[offset + 3] * weight;
+                    float r = 0, g = 0, b = 0, a = 0;
+                    int start = horizontal.Starts[x];
+                    int end = start + horizontal.Counts[x];
+                    for (int k = start; k < end; k++)
+                    {
+                        int offset = horizontal.Indices[k] * Canvas.BytesPerPixel;
+                        float weight = horizontal.Weights[k];
+                        r += row[offset] * weight;
+                        g += row[offset + 1] * weight;
+                        b += row[offset + 2] * weight;
+                        a += row[offset + 3] * weight;
+                    }
+
+                    int destination = rowBase + (x * Canvas.BytesPerPixel);
+                    intermediate[destination] = r;
+                    intermediate[destination + 1] = g;
+                    intermediate[destination + 2] = b;
+                    intermediate[destination + 3] = a;
+                }
+            }
+
+            // 垂直趟：只处理窗口完全落在本带的目标行，累加顺序与整图缓冲时一致
+            while (destinationY < height && MaxSourceRow(vertical, destinationY) < bandEnd)
+            {
+                Span<byte> destination = result.GetRow(destinationY);
+                int start = vertical.Starts[destinationY];
+                int end = start + vertical.Counts[destinationY];
+
+                for (int x = 0; x < width; x++)
+                {
+                    float r = 0, g = 0, b = 0, a = 0;
+                    for (int k = start; k < end; k++)
+                    {
+                        int offset = (((vertical.Indices[k] - bandStart) * rowFloats) + (x * Canvas.BytesPerPixel));
+                        float weight = vertical.Weights[k];
+                        r += intermediate[offset] * weight;
+                        g += intermediate[offset + 1] * weight;
+                        b += intermediate[offset + 2] * weight;
+                        a += intermediate[offset + 3] * weight;
+                    }
+
+                    byte alpha = ToByte(a);
+                    int o = x * Canvas.BytesPerPixel;
+                    bool clampToAlpha = alpha != 255;
+
+                    // 负权重核（Lanczos）可能让通道越界；预乘像素必须满足 rgb <= a
+                    destination[o] = ToByte(r, clampToAlpha ? alpha : 255);
+                    destination[o + 1] = ToByte(g, clampToAlpha ? alpha : 255);
+                    destination[o + 2] = ToByte(b, clampToAlpha ? alpha : 255);
+                    destination[o + 3] = alpha;
                 }
 
-                byte alpha = ToByte(a);
-                int o = x * Canvas.BytesPerPixel;
-                bool clampToAlpha = alpha != 255;
-
-                // 负权重核（Lanczos）可能让通道越界；预乘像素必须满足 rgb <= a
-                destination[o] = ToByte(r, clampToAlpha ? alpha : 255);
-                destination[o + 1] = ToByte(g, clampToAlpha ? alpha : 255);
-                destination[o + 2] = ToByte(b, clampToAlpha ? alpha : 255);
-                destination[o + 3] = alpha;
+                destinationY++;
             }
         }
 
         return result;
     }
+
+    private static int MinSourceRow(KernelTable table, int index) => table.Indices[table.Starts[index]];
+
+    private static int MaxSourceRow(KernelTable table, int index)
+        => table.Indices[table.Starts[index] + table.Counts[index] - 1];
 
     private static Canvas ScaleNearest(Canvas source, int width, int height)
     {

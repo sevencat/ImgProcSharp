@@ -1,5 +1,6 @@
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;
+using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
 
 namespace ImgProcSharp.Benchmarks;
@@ -46,6 +47,9 @@ public class FillBenchmarks
 
     [Benchmark(Baseline = true)]
     public void FillSolidRectangle() => _context.Fill(new Color(100, 149, 237), _rectangle);
+
+    [Benchmark]
+    public void FillTranslucentRectangle() => _context.Fill(new Color(100, 149, 237, 128), _rectangle);
 
     [Benchmark]
     public void FillGradientRectangle() => _context.Fill(_gradient, _rectangle);
@@ -127,6 +131,10 @@ public class CodecBenchmarks
 {
     private byte[] _png = null!;
     private byte[] _straight = null!;
+    private byte[] _rgbPng = null!;
+    private byte[] _jpeg = null!;
+    private Canvas _opaque1080 = null!;
+    private byte[] _straight1080 = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -146,10 +154,35 @@ public class CodecBenchmarks
         _straight = new byte[width * height * 4];
         canvas.CopyToStraight(_straight, width * 4);
         _png = PngWriter.Encode(_straight, width, height);
+
+        byte[] rgb = new byte[width * height * 3];
+        for (int i = 0, j = 0; i < _straight.Length; i += 4, j += 3)
+        {
+            rgb[j] = _straight[i];
+            rgb[j + 1] = _straight[i + 1];
+            rgb[j + 2] = _straight[i + 2];
+        }
+
+        _rgbPng = PngWriter.EncodeRgb8(rgb, width, height, new PngWriteOptions());
+        _jpeg = JpegEncoder.Encode(rgb, width, height, 3, new JpegEncodeOptions());
+        _opaque1080 = Canvas.Create(1920, 1080, Color.Red);
+        _straight1080 = new byte[1920 * 1080 * 4];
     }
 
     [Benchmark]
+    public bool IsFullyOpaque() => _opaque1080.IsFullyOpaque();
+
+    [Benchmark]
+    public void CopyToStraightOpaque() => _opaque1080.CopyToStraight(_straight1080, 1920 * 4);
+
+    [Benchmark]
     public Image Decode() => Image.Load(_png);
+
+    [Benchmark]
+    public Image DecodeOpaquePng() => Image.Load(_rgbPng);
+
+    [Benchmark]
+    public Image DecodeOpaqueJpeg() => Image.Load(_jpeg);
 
     [Benchmark]
     public byte[] Encode() => PngWriter.Encode(_straight, 800, 600);
@@ -166,4 +199,84 @@ public class CodecBenchmarks
         image.Canvas.CopyToStraight(straight, image.Width * 4);
         _ = PngWriter.Encode(straight, image.Width, image.Height);
     }
+}
+
+/// <summary>重采样：4K → 1080p，检查中间缓冲是否还按整图分配。</summary>
+[MemoryDiagnoser]
+[ShortRunJob]
+public class ResizeBenchmarks
+{
+    private Canvas _source = null!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _source = Canvas.Create(3840, 2160, Color.Red);
+        _source.SetColor(100, 100, Color.FromRgba(0, 255, 0, 255));
+    }
+
+    [Benchmark]
+    public Canvas Downscale4K() => _source.Resize(1920, 1080, KnownResamplers.Lanczos3);
+}
+
+/// <summary>像素导出：去预乘 + 通道重排/剔除。</summary>
+[ShortRunJob]
+public class ExportBenchmarks
+{
+    private Canvas _canvas = null!;
+
+    [GlobalSetup]
+    public void Setup() => _canvas = Canvas.Create(1024, 768, Color.Red);
+
+    [Benchmark]
+    public byte[] ToBgra32() => PixelOps.ToBgra32(_canvas);
+
+    [Benchmark]
+    public byte[] ToRgb24() => PixelOps.ToRgb24(_canvas);
+
+    [Benchmark]
+    public byte[] ToGray8() => PixelOps.ToGray8(_canvas);
+}
+
+/// <summary>整图变换（翻转/旋转）与图案平铺：逐像素搬移类操作的吞吐。</summary>
+[MemoryDiagnoser]
+[ShortRunJob]
+public class TransformBenchmarks
+{
+    private Canvas _canvas = null!;
+    private DrawingContext _context = null!;
+    private IPath _rectangle = null!;
+    private PatternBrush _pattern = null!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _canvas = Canvas.Create(1024, 768, Color.Red);
+        _context = new DrawingContext(Canvas.Create(1024, 768));
+        _rectangle = new RectangularPolygon(0, 0, 1024, 768);
+
+        using Canvas tile = Canvas.Create(8, 8);
+        for (int y = 0; y < 8; y++)
+        {
+            for (int x = 0; x < 8; x++)
+            {
+                tile.SetColor(x, y, (x + y) % 2 == 0 ? Color.White : Color.Black);
+            }
+        }
+
+        // 非零原点让平铺索引真的要走环绕
+        _pattern = new PatternBrush(tile, new PointF(3, 5));
+    }
+
+    [Benchmark]
+    public void FlipHorizontal() => _canvas.FlipHorizontal();
+
+    [Benchmark]
+    public Canvas Rotate90() => _canvas.Rotate90();
+
+    [Benchmark]
+    public Canvas Rotate180() => _canvas.Rotate180();
+
+    [Benchmark]
+    public void FillPattern() => _context.Fill(_pattern, _rectangle);
 }

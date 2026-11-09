@@ -34,6 +34,24 @@ public class ResizeTests
         Assert.Equal(255, resized.GetColor(width - 1, height - 1).A);
     }
 
+    [Theory]
+    [InlineData(nameof(KnownResamplers.Bilinear), 37, 71)]
+    [InlineData(nameof(KnownResamplers.Bicubic), 71, 37)]
+    [InlineData(nameof(KnownResamplers.Lanczos3), 53, 29)]
+    [InlineData(nameof(KnownResamplers.Lanczos3), 200, 160)]
+    public void BandedMatchesSingleBuffer(string samplerName, int width, int height)
+    {
+        using Canvas source = Canvas.Create(64, 53, Color.FromRgba(10, 200, 30, 120));
+        source.SetColor(5, 7, Color.FromRgba(255, 0, 0, 255));
+        source.SetColor(40, 33, Color.FromRgba(0, 0, 255, 40));
+
+        IResampler sampler = Sampler(samplerName);
+        using Canvas single = Resizer.ScaleCore(source, width, height, sampler, int.MaxValue);
+        using Canvas banded = Resizer.ScaleCore(source, width, height, sampler, 0);
+
+        Assert.Equal(single.Buffer, banded.Buffer);
+    }
+
     [Fact]
     public void SameSizeIsLossless()
     {

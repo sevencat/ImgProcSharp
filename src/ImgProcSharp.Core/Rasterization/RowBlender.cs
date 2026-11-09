@@ -64,6 +64,83 @@ internal static class RowBlender
         }
     }
 
+    /// <summary>
+    /// 整行覆盖率恒为 255 的实心色 source-over。此时 <c>a</c> 就是 <c>srcA</c>、源项是常量，
+    /// 每像素只剩一次 <c>dst * (255 - a) / 255</c>，比通用内核少一半的 <c>/255</c>。
+    /// 结果与 <c>OverSolid(dst, color, 全 255)</c> 逐字节相同。
+    /// </summary>
+    internal static void OverSolidFullRow(Span<byte> dst, Color color)
+    {
+        if (dst.Length % Canvas.BytesPerPixel != 0)
+        {
+            throw new ArgumentException("目标行长度必须是像素数 * 4。", nameof(dst));
+        }
+
+        // 源完全透明时 source-over 是恒等变换，连读都不用读。
+        if (color.A == 0)
+        {
+            return;
+        }
+
+        if (dst.Length >= Canvas.BytesPerPixel * 4 && Vector128.IsHardwareAccelerated)
+        {
+            OverSolidFullRowVector128(dst, color);
+            return;
+        }
+
+        OverSolidFullRowScalar(dst, color);
+    }
+
+    internal static void OverSolidFullRowScalar(Span<byte> dst, Color color)
+    {
+        int sa = color.A;
+        int inv = 255 - sa;
+        int sr = PixelOps.Mul255(color.R, sa);
+        int sg = PixelOps.Mul255(color.G, sa);
+        int sb = PixelOps.Mul255(color.B, sa);
+
+        for (int o = 0; o < dst.Length; o += Canvas.BytesPerPixel)
+        {
+            dst[o] = (byte)Math.Min(255, sr + PixelOps.Mul255(dst[o], inv));
+            dst[o + 1] = (byte)Math.Min(255, sg + PixelOps.Mul255(dst[o + 1], inv));
+            dst[o + 2] = (byte)Math.Min(255, sb + PixelOps.Mul255(dst[o + 2], inv));
+            dst[o + 3] = (byte)Math.Min(255, sa + PixelOps.Mul255(dst[o + 3], inv));
+        }
+    }
+
+    internal static void OverSolidFullRowVector128(Span<byte> dst, Color color)
+    {
+        int sa = color.A;
+        int sr = PixelOps.Mul255(color.R, sa);
+        int sg = PixelOps.Mul255(color.G, sa);
+        int sb = PixelOps.Mul255(color.B, sa);
+
+        Vector128<ushort> srcPx = Vector128.Create(
+            (ushort)sr, (ushort)sg, (ushort)sb, (ushort)sa,
+            (ushort)sr, (ushort)sg, (ushort)sb, (ushort)sa);
+        Vector128<ushort> inverse = Vector128.Create((ushort)(255 - sa));
+        Vector128<ushort> full = Vector128.Create((ushort)255);
+
+        ref byte dstRef = ref MemoryMarshal.GetReference(dst);
+        int i = 0;
+        for (; i + 16 <= dst.Length; i += 16)
+        {
+            Vector128<byte> raw = Vector128.LoadUnsafe(ref dstRef, (nuint)i);
+            Vector128<ushort> low = Vector128.WidenLower(raw);
+            Vector128<ushort> high = Vector128.WidenUpper(raw);
+
+            Vector128<ushort> resultLow = Vector128.Min(srcPx + Div255(low * inverse), full);
+            Vector128<ushort> resultHigh = Vector128.Min(srcPx + Div255(high * inverse), full);
+
+            Vector128.StoreUnsafe(Vector128.Narrow(resultLow, resultHigh), ref dstRef, (nuint)i);
+        }
+
+        if (i < dst.Length)
+        {
+            OverSolidFullRowScalar(dst.Slice(i), color);
+        }
+    }
+
     /// <summary>一次处理 4 个像素（16 字节 = 两个 8 通道向量）。</summary>
     internal static void OverSolidVector128(Span<byte> dst, Color color, ReadOnlySpan<byte> coverage)
     {
@@ -143,6 +220,92 @@ internal static class RowBlender
         Vector128<ushort> blended = Div255(srcPremultiplied * coverage);
         Vector128<ushort> inverse = full - Div255(srcAlpha * coverage);
         return Vector128.Min(blended + Div255(dst * inverse), full);
+    }
+
+    /// <summary>
+    /// 源是连续像素（瓦片/图案）的 source-over。<paramref name="src"/> 与 <paramref name="dst"/> 等长，
+    /// <paramref name="coverage"/> 每像素一个字节。
+    /// <para>
+    /// 预乘不变式保证 <c>sa == 0</c> 时 RGB 也是 0，此时混合结果是恒等的，因此两条路径都不必特判。
+    /// </para>
+    /// </summary>
+    internal static void OverPattern(Span<byte> dst, ReadOnlySpan<byte> src, ReadOnlySpan<byte> coverage)
+    {
+        if (src.Length != dst.Length || coverage.Length * Canvas.BytesPerPixel != dst.Length)
+        {
+            throw new ArgumentException("源、目标、覆盖率长度不匹配。", nameof(coverage));
+        }
+
+        if (dst.Length >= 16 && Vector128.IsHardwareAccelerated)
+        {
+            OverPatternVector128(dst, src, coverage);
+            return;
+        }
+
+        OverPatternScalar(dst, src, coverage);
+    }
+
+    internal static void OverPatternScalar(Span<byte> dst, ReadOnlySpan<byte> src, ReadOnlySpan<byte> coverage)
+    {
+        for (int i = 0, o = 0; i < coverage.Length; i++, o += Canvas.BytesPerPixel)
+        {
+            int c = coverage[i];
+            int a = PixelOps.Mul255(src[o + 3], c);
+            int inv = 255 - a;
+
+            dst[o] = (byte)Math.Min(255, PixelOps.Mul255(src[o], c) + PixelOps.Mul255(dst[o], inv));
+            dst[o + 1] = (byte)Math.Min(255, PixelOps.Mul255(src[o + 1], c) + PixelOps.Mul255(dst[o + 1], inv));
+            dst[o + 2] = (byte)Math.Min(255, PixelOps.Mul255(src[o + 2], c) + PixelOps.Mul255(dst[o + 2], inv));
+            dst[o + 3] = (byte)Math.Min(255, a + PixelOps.Mul255(dst[o + 3], inv));
+        }
+    }
+
+    internal static void OverPatternVector128(Span<byte> dst, ReadOnlySpan<byte> src, ReadOnlySpan<byte> coverage)
+    {
+        // 8 个 ushort 通道里，两个像素的 A 分别落在索引 3 和 7
+        Vector128<ushort> alphaDup = Vector128.Create(
+            (ushort)3, (ushort)3, (ushort)3, (ushort)3, (ushort)7, (ushort)7, (ushort)7, (ushort)7);
+        Vector128<ushort> full = Vector128.Create((ushort)255);
+
+        ref byte dstRef = ref MemoryMarshal.GetReference(dst);
+        ref byte srcRef = ref MemoryMarshal.GetReference(src);
+
+        int i = 0;
+        int c = 0;
+        for (; i + 16 <= dst.Length; i += 16, c += 4)
+        {
+            Vector128<byte> srcRaw = Vector128.LoadUnsafe(ref srcRef, (nuint)i);
+            Vector128<byte> dstRaw = Vector128.LoadUnsafe(ref dstRef, (nuint)i);
+
+            Vector128<ushort> srcLow = Vector128.WidenLower(srcRaw);
+            Vector128<ushort> srcHigh = Vector128.WidenUpper(srcRaw);
+            Vector128<ushort> dstLow = Vector128.WidenLower(dstRaw);
+            Vector128<ushort> dstHigh = Vector128.WidenUpper(dstRaw);
+
+            byte c0 = coverage[c];
+            byte c1 = coverage[c + 1];
+            byte c2 = coverage[c + 2];
+            byte c3 = coverage[c + 3];
+
+            Vector128<ushort> covLow = Vector128.Create(
+                (ushort)c0, (ushort)c0, (ushort)c0, (ushort)c0,
+                (ushort)c1, (ushort)c1, (ushort)c1, (ushort)c1);
+            Vector128<ushort> covHigh = Vector128.Create(
+                (ushort)c2, (ushort)c2, (ushort)c2, (ushort)c2,
+                (ushort)c3, (ushort)c3, (ushort)c3, (ushort)c3);
+
+            Vector128<ushort> resultLow = Blend(
+                dstLow, srcLow, Vector128.Shuffle(srcLow, alphaDup), covLow, full);
+            Vector128<ushort> resultHigh = Blend(
+                dstHigh, srcHigh, Vector128.Shuffle(srcHigh, alphaDup), covHigh, full);
+
+            Vector128.StoreUnsafe(Vector128.Narrow(resultLow, resultHigh), ref dstRef, (nuint)i);
+        }
+
+        if (i < dst.Length)
+        {
+            OverPatternScalar(dst.Slice(i), src.Slice(i), coverage.Slice(c));
+        }
     }
 
     /// <summary>ushort 通道上的 <c>x / 255</c>：<c>(t + (t &gt;&gt; 8)) &gt;&gt; 8</c>，<c>t = x + 128</c>。</summary>

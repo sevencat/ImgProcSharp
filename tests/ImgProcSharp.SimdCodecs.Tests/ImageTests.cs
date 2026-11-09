@@ -1,5 +1,6 @@
 using System.Numerics;
 using Sdcb.SimdCodecs.Abstractions;
+using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
 using Xunit;
 
@@ -281,6 +282,111 @@ public sealed class ImageTests
         }
 
         Assert.True(inked, "DrawText 没有在渐变上留下墨迹");
+    }
+
+    [Fact]
+    public void DefaultDecodeMatchesFullDecode()
+    {
+        using Canvas source = Canvas.Create(7, 5);
+        for (int y = 0; y < source.Height; y++)
+        {
+            for (int x = 0; x < source.Width; x++)
+            {
+                source.SetColor(x, y, Color.FromRgba((byte)(x * 31), (byte)(y * 47), (byte)(x * y * 7), (byte)((x + y) * 23)));
+            }
+        }
+
+        byte[] png = EncodePng(source);
+
+        using Image direct = Image.Load(png);
+        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+
+        Assert.Equal(full.Width, direct.Width);
+        Assert.Equal(full.Height, direct.Height);
+        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.True(direct.IccProfile.IsEmpty);
+    }
+
+    [Fact]
+    public void DefaultDecodeMatchesFullDecodeFor16BitPng()
+    {
+        ushort[] samples = new ushort[4 * 3 * 4];
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] = (ushort)(i * 4099 % 65536);
+        }
+
+        byte[] png = PngWriter.EncodeRgba16(samples, 4, 3, new PngWriteOptions());
+
+        using Image direct = Image.Load(png);
+        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+
+        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+    }
+
+    [Fact]
+    public void PngIccNeedsFullDecode()
+    {
+        byte[] straight = new byte[2 * 2 * 4];
+        byte[] icc = [1, 2, 3, 4, 5];
+        byte[] png = PngWriter.Encode(straight, 2, 2, new PngWriteOptions { IccProfile = icc });
+
+        using Image direct = Image.Load(png);
+        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+
+        // 1.4 的 PngReader.ReadHeader 是 internal，直写路径拿不到 PNG 的 iCCP
+        Assert.True(direct.IccProfile.IsEmpty);
+        Assert.Equal(icc, full.IccProfile.ToArray());
+    }
+
+    [Fact]
+    public void DefaultDecodeTakesIccFromJpegHeader()
+    {
+        byte[] straight = new byte[16 * 16 * 3];
+        byte[] icc = [1, 2, 3, 4, 5];
+        byte[] jpeg = JpegEncoder.Encode(straight, 16, 16, 3, new JpegEncodeOptions { IccProfile = icc });
+
+        using Image direct = Image.Load(jpeg);
+        using Image full = Image.Load(jpeg, new ImageDecodeOptions { RequireIccProfile = true });
+
+        Assert.Equal(icc, direct.IccProfile.ToArray());
+        Assert.Equal(icc, full.IccProfile.ToArray());
+    }
+
+    [Fact]
+    public void OpaqueJpegMatchesFullDecode()
+    {
+        byte[] rgb = new byte[16 * 16 * 3];
+        for (int i = 0; i < rgb.Length; i++)
+        {
+            rgb[i] = (byte)(i * 37);
+        }
+
+        byte[] jpeg = JpegEncoder.Encode(rgb, 16, 16, 3, new JpegEncodeOptions());
+
+        using Image direct = Image.Load(jpeg);
+        using Image full = Image.Load(jpeg, new ImageDecodeOptions { RequireIccProfile = true });
+
+        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.True(direct.Canvas.IsFullyOpaque());
+    }
+
+    [Fact]
+    public void OpaqueRgbPngMatchesFullDecode()
+    {
+        byte[] rgb = new byte[16 * 16 * 3];
+        for (int i = 0; i < rgb.Length; i++)
+        {
+            rgb[i] = (byte)(i * 37);
+        }
+
+        byte[] png = PngWriter.EncodeRgb8(rgb, 16, 16, new PngWriteOptions());
+
+        using Image direct = Image.Load(png);
+        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+
+        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.True(direct.Canvas.IsFullyOpaque());
     }
 
     private static byte[] EncodePng(Canvas canvas)

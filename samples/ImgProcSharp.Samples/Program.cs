@@ -10,7 +10,7 @@ namespace ImgProcSharp.Samples;
 /// 跑出三张图：
 /// <list type="bullet">
 /// <item><c>output/result.png</c>：纯矢量海报（渐变背景 + 圆角卡片 + 中英文排版 + 描边 + 变换）。</item>
-/// <item><c>output/photo.jpg</c>：照片管线——<see cref="Image.Load(string)"/> 解码 JPEG
+/// <item><c>output/photo.jpg</c>：照片管线——<see cref="Image.Load(string, ImageDecodeOptions)"/> 解码 JPEG
 /// （内部就是 <c>Sdcb.SimdCodecs</c> 的解码门面），在像素上叠标注，再用 <see cref="JpegEncoder"/> 编码回去。</item>
 /// <item><c>output/compare.png</c>：原图与处理后的成品左右拼成一张对比图。</item>
 /// </list>

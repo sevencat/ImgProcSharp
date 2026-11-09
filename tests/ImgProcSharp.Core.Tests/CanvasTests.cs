@@ -31,6 +31,25 @@ public class CanvasTests
     }
 
     [Fact]
+    public void IsFullyOpaqueSeesTransparencyInSimdBody()
+    {
+        using Canvas canvas = Canvas.Create(19, 3, Color.Red);
+        Assert.True(canvas.IsFullyOpaque());
+
+        canvas.SetColor(5, 1, Color.FromRgba(1, 2, 3, 254));
+        Assert.False(canvas.IsFullyOpaque());
+    }
+
+    [Fact]
+    public void IsFullyOpaqueChecksTailPixels()
+    {
+        // 19 * 3 = 57 个像素：SIMD 处理前 56 个，最后一个走标量尾部
+        using Canvas canvas = Canvas.Create(19, 3, Color.Red);
+        canvas.SetColor(18, 2, Color.FromRgba(1, 2, 3, 128));
+        Assert.False(canvas.IsFullyOpaque());
+    }
+
+    [Fact]
     public void CreateRejectsNonPositiveSize()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => Canvas.Create(0, 1));
@@ -229,6 +248,23 @@ public class CanvasTests
                 tight.AsSpan(y * 12, 12).ToArray(),
                 padded.AsSpan(y * 20, 12).ToArray());
         }
+    }
+
+    [Fact]
+    public void CopyToStraightOpaqueMatchesUnpremultiplyPath()
+    {
+        using Canvas canvas = Canvas.Create(9, 3, new Color(10, 20, 30, 255));
+
+        var bulk = new byte[9 * 3 * 4];
+        canvas.CopyToStraight(bulk, 9 * 4);
+
+        var expected = new byte[9 * 3 * 4];
+        for (int y = 0; y < canvas.Height; y++)
+        {
+            PixelOps.Unpremultiply(canvas.GetRow(y), expected.AsSpan(y * 36, 36));
+        }
+
+        Assert.Equal(expected, bulk);
     }
 
     [Fact]

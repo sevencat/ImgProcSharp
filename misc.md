@@ -57,10 +57,9 @@ byte[] ToRgba8();               // display tier：4 通道 RGBA8，紧密排列
 
 ```
 ImageDecoderBridge.Decode(byte[] data) -> Image
-    SimdCodecs.TryReadInfo(data, out info)   // Format / Orientation / 尺寸
-    SimdCodecs.TryDecode(data, out var dec)
-    rgba = dec.ToRgba8()                     // 一次整图分配 + 拷贝
-    逐行 premultiply → Canvas
+    SimdCodecs.TryReadInfo(data, out info)          // Format / Orientation / 尺寸
+    SimdCodecs.TryDecodeInto(data, canvas, Rgba32)  // 直写画布，无中间数组
+    不透明图跳过，否则 premultiply → Canvas          // plan §12.2-7
 ```
 
 代价：比 2.0 的 `ImageDecoder.Open + ImageFrame.CopyPixels` 多一次整图拷贝（12 MP ≈ 5–10 ms），换来的是「今天就能 `PackageReference 1.4.0`」。v1 接受。
@@ -166,7 +165,7 @@ outC = (srcC*sa + dstC*da*(1-sa)) / outA        ← 除法 + outA==0 特例
 
 代价与处理：
 
-- 存图前需要 unpremultiply（`c/a`），只在边界发生一次；**画布本来全不透明时（从 JPEG 读入、或先 `Fill` 了不透明底色）可以整段跳过**。
+- 存图前需要 unpremultiply（`c/a`），只在边界发生一次；**画布本来全不透明时（从 JPEG 读入、或先 `Fill` 了不透明底色）可以整段跳过**——已落地为 `CopyToStraight` 里的 `IsFullyOpaque()` 快路径（plan §12.2-8）。
 - 8-bit 预乘有精度损失（低 alpha 的深色会丢色阶）。缓解：unpremultiply 用 `(c * 255 + a/2) / a` 的定点实现，并对 `a < 8` 的像素直接输出 `(0,0,0,0)`，避免噪声被放大。
 - 定点乘 255 的常用加速：`Div255(x) = t = x + 0x80; (t + (t >> 8)) >> 8`，比 `(x + 127) / 255` 快且四舍五入等价。
 
@@ -278,14 +277,14 @@ for 开放路径两端:
 
 | 场景 | 走哪条 |
 |---|---|
-| 解码 → 画布 | `IDecodedImage.ToRgba8()`（1.4.0 的 display tier，4 通道 RGBA8、紧密排列）→ 原地预乘进 `Canvas` |
+| 解码 → 画布 | 默认 `TryDecodeInto(..., ImagePixelFormat.Rgba32)` 直写画布缓冲；`RequireIccProfile = true` 时 `TryDecode` → `PixelConverter.TryConvert` 逐行转换 |
 | 画布 → PNG | `Canvas.CopyToStraight` → `Sdcb.SimdCodecs.Png.PngWriter.Encode`（调用方/测试侧，不进本库） |
 | 需要 16 位保真 | v1 不支持，文档写明「解码即降到 8 位、输出即 8 位」 |
 | 灰度图输入 | `ToRgba8()` 负责展成 4 通道，画布不用区分 |
 | 输出无 alpha 需求 | 全不透明时可跳过 unpremultiply，且 PNG 仍是 RGBA（文件略大，逻辑零分支） |
 | 内部其他格式（Bgra32 等） | `Canvas` 只存 Rgba32；提供 `PixelOps.ToBgra32/ToRgb24/ToGray8` 供调用方导出 |
 
-不依赖 1.4.0 的 `TryDecodeInto(..., ImagePixelFormat)`：它要求调用方先知道尺寸，而 1.4.0 门面没有暴露 `TryReadInfo`，为此多解一次不划算。2.0 换成 `ImageFrame.CopyPixels` 后可以省掉那次整图拷贝（见 §B）。
+`SimdCodecs.TryReadInfo` 在 1.4.0 门面里确实有，所以 `TryDecodeInto(..., ImagePixelFormat)` 可用，并且已经是默认路径。它唯一的缺口是 ICC：JPEG 能用 `JpegDecoder.TryReadIccProfile` 只扫 APP2 段补上，PNG 的 `PngReader.ReadHeader` 是 internal、WebP 的 ICCP 要先解码，因此 ICC 做成 `RequireIccProfile` 开关（见 plan §12.2-6）。
 
 ---
 
@@ -295,7 +294,7 @@ for 开放路径两端:
 
 - 带 Display P3 / AdobeRGB ICC 的图，画出来的颜色与浏览器/看图软件相比会偏（通常偏艳）。
 - 我们存图时把 ICC 原样写进 `iCCP` 块，所以「偏」在链条上是一致的——看图软件会按原 ICC 解释。
-- 如果调用方要求严格一致：在 `Load` 后自行做一次 ICC→sRGB 转换（本库不做），再设 `IncludeIccProfile = false` 并让 `sRGB` 块生效。
+- 如果调用方要求严格一致：在 `Load` 后自行做一次 ICC→sRGB 转换（本库不做；需要 ICC 时用 `RequireIccProfile = true` 加载），输出时不再写 ICC、改让 `sRGB` 块生效。
 - 文档里必须写这条，否则第一个 issue 就是「颜色不对」。
 
 ---

@@ -23,24 +23,31 @@ public sealed class Image : IDisposable
     }
 
     /// <summary>从文件加载。格式由内容决定，不看扩展名。</summary>
+    /// <param name="path">文件路径。</param>
+    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
     /// <exception cref="IOException">读文件失败。</exception>
     /// <exception cref="InvalidDataException">不是可解码的图像。</exception>
-    public static Image Load(string path)
+    public static Image Load(string path, ImageDecodeOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return ImageDecoderBridge.Decode(File.ReadAllBytes(path));
+        return ImageDecoderBridge.Decode(File.ReadAllBytes(path), options);
     }
 
     /// <summary>从流加载（读到结尾）。<paramref name="leaveOpen"/> 为 <see langword="false"/> 时负责释放流。</summary>
-    public static Image Load(Stream stream, bool leaveOpen = false)
+    /// <param name="stream">要读取的流。</param>
+    /// <param name="leaveOpen">读完是否保留流。</param>
+    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
+    public static Image Load(Stream stream, bool leaveOpen = false, ImageDecodeOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         try
         {
-            using var buffer = new MemoryStream();
+            // 可寻址流按剩余长度预分配，省掉 MemoryStream 反复翻倍扩容的整块拷贝。
+            long remaining = stream.CanSeek ? stream.Length - stream.Position : 0;
+            using var buffer = new MemoryStream(remaining is > 0 and <= int.MaxValue ? (int)remaining : 0);
             stream.CopyTo(buffer);
-            return ImageDecoderBridge.Decode(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
+            return ImageDecoderBridge.Decode(buffer.GetBuffer().AsSpan(0, (int)buffer.Length), options);
         }
         finally
         {
@@ -52,7 +59,10 @@ public sealed class Image : IDisposable
     }
 
     /// <summary>从内存加载。</summary>
-    public static Image Load(ReadOnlySpan<byte> data) => ImageDecoderBridge.Decode(data);
+    /// <param name="data">完整的编码图像字节。</param>
+    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
+    public static Image Load(ReadOnlySpan<byte> data, ImageDecodeOptions? options = null) =>
+        ImageDecoderBridge.Decode(data, options);
 
     /// <summary>新建空白画布（全透明，除非指定 <paramref name="background"/>）。</summary>
     public static Image Create(int width, int height, Color? background = null) =>
@@ -71,7 +81,7 @@ public sealed class Image : IDisposable
     /// <summary>原图的 ICC 配置（没有则为空）。只做透传，不做色彩管理。</summary>
     public ReadOnlyMemory<byte> IccProfile { get; }
 
-    /// <summary>EXIF 方向。<see cref="Load(string)"/> 不会自动应用，需要时调 <see cref="ApplyOrientation"/>。</summary>
+    /// <summary>EXIF 方向。<see cref="Load(string, ImageDecodeOptions)"/> 不会自动应用，需要时调 <see cref="ApplyOrientation"/>。</summary>
     public ImageOrientation Orientation { get; private set; }
 
     /// <summary>链式处理：绘制/缩放后返回自身。</summary>
