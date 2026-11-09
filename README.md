@@ -17,8 +17,9 @@ dotnet add package Sevencat.ImgproSharp
 
 ```csharp
 using ImgProcSharp;
+using Sdcb.SimdCodecs;
+using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
-using Sdcb.SimdCodecs.Png;
 
 using var image = Image.Load("in.jpg");
 image.Mutate(x => x
@@ -28,27 +29,35 @@ image.Mutate(x => x
 // 图片来源信息顺带带出
 Console.WriteLine($"{image.SourceFormat} {image.Width}×{image.Height}, EXIF {image.Orientation}");
 
-// v1 不自带存图：直通像素 + 一行编码器（都是 Sdcb.SimdCodecs 自带，无需额外包）
-byte[] straight = new byte[image.Width * image.Height * 4];
-image.Canvas.CopyToStraight(straight, image.Width * 4);
-File.WriteAllBytes("out.png", PngWriter.Encode(straight, image.Width, image.Height));
+// v1 不自带存图：Sdcb.SimdCodecs 2.0 的门面一行编码，预乘画布直接喂，
+// 不用先摊一张直通 RGBA（编码器边还原预乘边编）
+File.WriteAllBytes(
+    "out.png",
+    ImageCodecs.Encode(
+        image.Canvas.Buffer, image.Width, image.Height,
+        PixelFormat.Rgba32Premultiplied, ImageFormat.Png, stride: image.Canvas.Stride));
 
-// JPEG 同理：4 通道入参、alpha 被忽略，quality 1..100
+// JPEG 同理，quality 1..100
 File.WriteAllBytes(
     "out.jpg",
-    JpegEncoder.Encode(straight, image.Width, image.Height, 4, new JpegEncodeOptions { Quality = 92 }));
+    ImageCodecs.Encode(
+        image.Canvas.Buffer, image.Width, image.Height,
+        PixelFormat.Rgba32Premultiplied, ImageFormat.Jpeg, stride: image.Canvas.Stride,
+        options: new JpegEncodeOptions { Quality = 92 }));
 ```
 
 ## Status
 
-`0.1.0` — work in progress, API 尚未稳定。
+`0.2.0` — work in progress, API 尚未稳定。
 
-- 输入：`Sdcb.SimdCodecs` 1.4.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm）。
-- 输出：**本库不提供 `Save`**。PNG 用 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 用 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`（都在 1.4.0 里，随元包传递引用）；其余格式（WebP 等）等 0.2（见 `plan.md` §Q）。
-- 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`；默认解码走直写，ICC 尽力而为，需要保证时用 `ImageDecodeOptions.RequireIccProfile`）。
+- 输入：`Sdcb.SimdCodecs` 2.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm / ICO / JPEG 2000 / JBIG2）。
+- 输出：**本库不提供 `Save`**。PNG 用 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 用 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`，或一步走 `ImageCodecs.Encode`（都在 2.0 里，随元包传递引用）；其余格式（WebP 等）等 0.3（见 `plan.md` §Q）。
+- 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`；2.0 起任何格式的 ICC 都只扫文件头就能拿到）。
 - 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（Miter/Bevel/Round 连接、Butt/Round/Square 端点、`MiterLimit`、虚线）、`Matrix3x2` 变换（笔刷、线宽与虚线同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
 - 文字：内嵌文泉驿微米黑（2 MB gzip），无 kerning / 无 GSUB / 无双向文本 / 无彩色 emoji。
-- 还没做（0.2）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。
+- 还没做（0.3）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。
+
+0.2.0 相对 0.1.0：依赖升到 `Sdcb.SimdCodecs` 2.0.0（`Image.Load(path)` 改内存映射、任何格式的 ICC 都从文件头免费拿到），`ImageDecodeOptions.RequireIccProfile` 已失效（标 `[Obsolete]`，源码兼容），其余 API 不变。
 
 ## 现在就能用的部分（core + ext，M6/M7 完成）
 
@@ -158,6 +167,21 @@ docs/                                README 首页预览图（compare.jpg，示�
 ```
 
 核心源码通过 `Compile Include` 编进打包程序集，因此只发一个 dll、一个包。
+
+## 底座：Sdcb.SimdCodecs 2.0
+
+本库只负责「画」，读和写都交给 [Sdcb.SimdCodecs](https://github.com/sdcb/SimdCodecs)。这个包值得单独夸几句——它把一个通常要靠 libjpeg / libpng / libwebp 三件套才敢接的活儿，用纯 C# 做完了：
+
+- **纯托管，但是真 SIMD。** 名字不是噱头：JPEG 的 IDCT、YCbCr→RGBA、色度上采样，PNG 的反滤波与 RGBA8 展开，WebP 的 VP8/VP8L 重建与环路滤波，BMP/PNM 的像素搬运，全是手写的 `Vector128/256/512` 内核。于是没有 P/Invoke、没有随包发布的原生库，`PublishAot` 出来的 win-x64 自包含单文件约 9.8 MB 里就装着全套编解码器（见 `samples/ImgProcSharp.AotSmoke`：JIT 与 AOT 输出逐字节一致）。
+- **一个门面，十二个格式子包。** PNG（含 APNG）、JPEG（基线 / 渐进 / 无损 / gain map）、WebP（VP8 + VP8L）、GIF、BMP、TIFF、ICO / CUR、QOI、PNM 家族（PBM / PGM / PPM / PAM / PFM）、JPEG 2000、JBIG2。格式靠 magic byte 嗅探，不看扩展名；解码、编码、元数据是同一个 `ImageCodecs` 类上的几个方法，`dotnet add package Sdcb.SimdCodecs` 一行带走全部。
+- **解码不多拷一次。** `TryDecodeInto(data, dest, stride, PixelFormat)` 让解码器直接写进调用方的缓冲（JPEG 那条路径是字面意义的零拷贝）。本库的画布就是那块缓冲——所以「解码」实际上不在本库的耗时里。
+- **元数据不要钱。** `TryReadMetadata` 只扫文件头就给出 ICC / EXIF / XMP，不为了一段 ICC 去解 12 MP 的像素。本库正是靠它把「直写解码」和「读 ICC」这两件原本互斥的事同时做到（见 `plan.md` §12.2-14）。
+- **文件不从托管堆过。** `ImageDecoder.Open(path)` 走内存映射，编码字节按页喂给解码器；12 MP 的 JPEG 不再需要一次 5–10 MB 的托管分配。
+- **缩放解码是真的省算力。** JPEG 能在 DCT 域直接出 1/2…1/8 的图——出 1/8 缩略图时省掉 98% 的像素计算，而不是「先解 12 MP 再缩」。
+- **编码端同样齐。** `PngWriter`（自适应滤波、`DiscardAlpha`）、`JpegEncoder`（质量、优化 Huffman、渐进）、统一出口 `ImageCodecs.Encode`（`byte[]` / `Stream` / `IBufferWriter` 三选一）。本库测试与示例的输出全靠它，一行 `PackageReference` 就够，不必内嵌任何 dll；`DiscardAlpha` 让不透明图少一行整图拷贝、少喂 deflate 四分之一的输入，800×600 实测 184.8 → 149.7 ms。
+- **保真层也没放弃。** 除了 8 位 RGBA 的 display tier，`IDecodedImage` 还保留原生位深、`ColorEncoding` 与 `ToFloats()` 的 float32 视图——16 位 PNG、HDR JPEG 这类图不会在门面里被悄悄压成 8 位。
+
+MIT 许可，作者 [sdcb](https://github.com/sdcb)。本项目对它的全部依赖就是 `ImageDecoderBridge.cs` 一个文件 + 调用方那几行 `ImageCodecs.Encode`。
 
 ## Docs
 

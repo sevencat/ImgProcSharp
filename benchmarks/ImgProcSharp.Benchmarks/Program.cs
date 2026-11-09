@@ -133,6 +133,7 @@ public class CodecBenchmarks
     private byte[] _straight = null!;
     private byte[] _rgbPng = null!;
     private byte[] _jpeg = null!;
+    private Canvas _opaque800 = null!;
     private Canvas _opaque1080 = null!;
     private byte[] _straight1080 = null!;
 
@@ -142,8 +143,8 @@ public class CodecBenchmarks
         const int width = 800;
         const int height = 600;
 
-        using Canvas canvas = Canvas.Create(width, height);
-        new DrawingContext(canvas).Fill(
+        _opaque800 = Canvas.Create(width, height);
+        new DrawingContext(_opaque800).Fill(
             new LinearGradientBrush(
                 new PointF(0, 0),
                 new PointF(width, height),
@@ -152,7 +153,7 @@ public class CodecBenchmarks
             new RectangularPolygon(0, 0, width, height));
 
         _straight = new byte[width * height * 4];
-        canvas.CopyToStraight(_straight, width * 4);
+        _opaque800.CopyToStraight(_straight, width * 4);
         _png = PngWriter.Encode(_straight, width, height);
 
         byte[] rgb = new byte[width * height * 3];
@@ -187,6 +188,18 @@ public class CodecBenchmarks
     [Benchmark]
     public byte[] Encode() => PngWriter.Encode(_straight, 800, 600);
 
+    /// <summary>
+    /// 不透明画布直喂编码器：预乘缓冲就是直通缓冲，省掉整图 <c>CopyToStraight</c>，
+    /// 再用 <c>DiscardAlpha</c> 免掉 alpha 通道的 deflate 工作量。与 <see cref="Encode"/> 对比即为省下的那部分。
+    /// </summary>
+    [Benchmark]
+    public byte[] EncodeFromCanvas() =>
+        PngWriter.Encode(
+            _opaque800.Buffer.AsSpan(0, _opaque800.Stride * _opaque800.Height),
+            800,
+            600,
+            new PngWriteOptions { DiscardAlpha = true });
+
     [Benchmark]
     public void DecodeMutateEncode()
     {
@@ -195,9 +208,13 @@ public class CodecBenchmarks
             .Fill(Color.White, new RectangularPolygon(16, 16, 200, 80))
             .Draw(new Pen(Color.Black, 3f), new CirclePolygon(400, 300, 120)));
 
-        byte[] straight = new byte[image.Width * image.Height * 4];
-        image.Canvas.CopyToStraight(straight, image.Width * 4);
-        _ = PngWriter.Encode(straight, image.Width, image.Height);
+        // _png 出自全不透明画布，解码后 alpha 仍全是 255，所以 DiscardAlpha 安全
+        Canvas canvas = image.Canvas;
+        _ = PngWriter.Encode(
+            canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height),
+            image.Width,
+            image.Height,
+            new PngWriteOptions { DiscardAlpha = true });
     }
 }
 

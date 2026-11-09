@@ -1,22 +1,26 @@
 namespace ImgProcSharp;
 
 
-/// <summary>解码选项。</summary>
+/// <summary>
+/// 解码选项。
+/// <para>
+/// Sdcb.SimdCodecs 2.0 之后这里已经没有可调的开关（ICC 任何格式都能从文件头拿到，直写路径是唯一路径），
+/// 保留类型只是为了让 <see cref="Image.Load(string, ImageDecodeOptions?)"/> 等签名不破 0.1.0 的源码兼容。
+/// </para>
+/// </summary>
 public sealed class ImageDecodeOptions
 {
-    /// <summary>默认选项：直写快路径，ICC 能顺手拿到就带上。</summary>
+    /// <summary>默认选项。</summary>
     public static ImageDecodeOptions Default { get; } = new();
 
     /// <summary>
-    /// 是否必须拿到 ICC 配置（默认 <see langword="false"/>）。
+    /// 已失效（2.0 起恒等于「总能拿到 ICC」）。
     /// <para>
-    /// 默认走直写路径：解码器把像素直接写进画布缓冲，不分配解码器自己的输出数组；
-    /// ICC 从文件头顺手取（PNG 的 <c>iCCP</c>、JPEG 的 APP2 <c>ICC_PROFILE</c>），取不到就留空。
-    /// </para>
-    /// <para>
-    /// 置为 <see langword="true"/> 时改用完整解码（<c>TryDecode</c> + 逐行转换），任何格式都能拿到
-    /// <see cref="Image.IccProfile"/>，代价是多一份解码器输出缓冲和一次整图转换。
+    /// 1.4 时代只有 JPEG 公开了「只读文件头拿 ICC」，PNG/WebP 想要 ICC 只能完整解码一遍，
+    /// 所以留了这个开关；2.0 的 <c>TryReadMetadata</c> 对所有格式都只扫元数据段
+    /// （JPEG APP2、PNG <c>iCCP</c>、WebP <c>ICCP</c>、TIFF IFD），不再需要为 ICC 走慢路径。
     /// </para>
     /// </summary>
+    [Obsolete("Sdcb.SimdCodecs 2.0 起任何格式的 ICC 都由文件头直接给出，此开关已无作用。")]
     public bool RequireIccProfile { get; init; }
 }

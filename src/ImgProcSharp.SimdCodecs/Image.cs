@@ -6,8 +6,9 @@ namespace ImgProcSharp;
 /// <summary>
 /// 一张可绘制的图：解码后的 <see cref="Canvas"/> 加上它的来源信息。
 /// <para>
-/// v1 不提供 <c>Save</c>：输出编码不在本库范围内（需要时用 <c>Sdcb.SimdCodecs.Png.PngWriter</c> 直接写
-/// <see cref="Canvas"/> 的直通像素，见 README）。
+/// v1 不提供 <c>Save</c>：输出编码不在本库范围内。Sdcb.SimdCodecs 2.0 之后调用方可以一步把画布喂给
+/// <c>ImageCodecs.Encode(..., PixelFormat.Rgba32Premultiplied, ...)</c>，也可以在不透明时直接把
+/// <see cref="Canvas.Buffer"/> 交给 <c>PngWriter</c>（预乘即直通），见 README。
 /// </para>
 /// </summary>
 public sealed class Image : IDisposable
@@ -24,22 +25,24 @@ public sealed class Image : IDisposable
 
     /// <summary>从文件加载。格式由内容决定，不看扩展名。</summary>
     /// <param name="path">文件路径。</param>
-    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
+    /// <param name="options">解码选项（2.0 起已无可用开关，仅为源码兼容保留）。</param>
     /// <exception cref="IOException">读文件失败。</exception>
     /// <exception cref="InvalidDataException">不是可解码的图像。</exception>
     public static Image Load(string path, ImageDecodeOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return ImageDecoderBridge.Decode(File.ReadAllBytes(path), options);
+        _ = options;
+        return ImageDecoderBridge.DecodeFile(path);
     }
 
     /// <summary>从流加载（读到结尾）。<paramref name="leaveOpen"/> 为 <see langword="false"/> 时负责释放流。</summary>
     /// <param name="stream">要读取的流。</param>
     /// <param name="leaveOpen">读完是否保留流。</param>
-    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
+    /// <param name="options">解码选项（2.0 起已无可用开关，仅为源码兼容保留）。</param>
     public static Image Load(Stream stream, bool leaveOpen = false, ImageDecodeOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        _ = options;
 
         try
         {
@@ -47,7 +50,7 @@ public sealed class Image : IDisposable
             long remaining = stream.CanSeek ? stream.Length - stream.Position : 0;
             using var buffer = new MemoryStream(remaining is > 0 and <= int.MaxValue ? (int)remaining : 0);
             stream.CopyTo(buffer);
-            return ImageDecoderBridge.Decode(buffer.GetBuffer().AsSpan(0, (int)buffer.Length), options);
+            return ImageDecoderBridge.Decode(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
         }
         finally
         {
@@ -60,9 +63,12 @@ public sealed class Image : IDisposable
 
     /// <summary>从内存加载。</summary>
     /// <param name="data">完整的编码图像字节。</param>
-    /// <param name="options">解码选项；为空时用 <see cref="ImageDecodeOptions.Default"/>。</param>
-    public static Image Load(ReadOnlySpan<byte> data, ImageDecodeOptions? options = null) =>
-        ImageDecoderBridge.Decode(data, options);
+    /// <param name="options">解码选项（2.0 起已无可用开关，仅为源码兼容保留）。</param>
+    public static Image Load(ReadOnlySpan<byte> data, ImageDecodeOptions? options = null)
+    {
+        _ = options;
+        return ImageDecoderBridge.Decode(data);
+    }
 
     /// <summary>新建空白画布（全透明，除非指定 <paramref name="background"/>）。</summary>
     public static Image Create(int width, int height, Color? background = null) =>

@@ -1,4 +1,5 @@
 using System.Numerics;
+using Sdcb.SimdCodecs;
 using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
@@ -40,6 +41,64 @@ public sealed class ImageTests
                 Assert.Equal(expected.A, actual.A);
             }
         }
+    }
+
+    [Fact]
+    public void EncodeFromPremultipliedCanvasKeepsPixels()
+    {
+        using Canvas source = Canvas.Create(3, 2);
+        source.SetColor(0, 0, Color.FromRgba(10, 20, 30, 255));
+        source.SetColor(1, 0, Color.FromRgba(200, 100, 50, 128));
+        source.SetColor(2, 0, Color.FromRgba(0, 255, 0, 0));
+        source.SetColor(0, 1, Color.FromRgba(255, 255, 255, 64));
+        source.SetColor(1, 1, Color.Red);
+        source.SetColor(2, 1, Color.Blue);
+
+        // 带透明画布的推荐保存方式：预乘缓冲直接喂编码门面，不摊一张直通数组
+        byte[] png = ImageCodecs.Encode(
+            source.Buffer,
+            source.Width,
+            source.Height,
+            PixelFormat.Rgba32Premultiplied,
+            ImageFormat.Png,
+            stride: source.Stride,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        using Image image = Image.Load(png);
+
+        for (int y = 0; y < 2; y++)
+        {
+            for (int x = 0; x < 3; x++)
+            {
+                Color expected = source.GetColor(x, y);
+                Color actual = image.Canvas.GetColor(x, y);
+
+                Assert.InRange(Math.Abs(expected.R - actual.R), 0, 1);
+                Assert.InRange(Math.Abs(expected.G - actual.G), 0, 1);
+                Assert.InRange(Math.Abs(expected.B - actual.B), 0, 1);
+                Assert.Equal(expected.A, actual.A);
+            }
+        }
+    }
+
+    [Fact]
+    public void OpaqueCanvasEncodesWithoutStraightCopy()
+    {
+        using Canvas source = Canvas.Create(4, 2, Color.Red);
+        source.SetColor(1, 0, Color.Blue);
+
+        // 不透明画布的推荐保存方式：预乘缓冲即直通缓冲，直接用 + DiscardAlpha 丢掉 alpha 通道
+        byte[] png = PngWriter.Encode(
+            source.Buffer,
+            source.Width,
+            source.Height,
+            new PngWriteOptions { DiscardAlpha = true });
+
+        using Image image = Image.Load(png);
+
+        Assert.True(image.Canvas.IsFullyOpaque());
+        Assert.Equal(source.GetColor(1, 0), image.Canvas.GetColor(1, 0));
+        Assert.Equal(source.GetColor(3, 1), image.Canvas.GetColor(3, 1));
     }
 
     [Fact]
@@ -285,7 +344,7 @@ public sealed class ImageTests
     }
 
     [Fact]
-    public void DefaultDecodeMatchesFullDecode()
+    public void DirectDecodeMatchesRasterDecode()
     {
         using Canvas source = Canvas.Create(7, 5);
         for (int y = 0; y < source.Height; y++)
@@ -299,16 +358,16 @@ public sealed class ImageTests
         byte[] png = EncodePng(source);
 
         using Image direct = Image.Load(png);
-        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+        using Canvas raster = ImageDecoderBridge.DecodeThroughRaster(png);
 
-        Assert.Equal(full.Width, direct.Width);
-        Assert.Equal(full.Height, direct.Height);
-        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.Equal(raster.Width, direct.Width);
+        Assert.Equal(raster.Height, direct.Height);
+        Assert.Equal(raster.Buffer, direct.Canvas.Buffer);
         Assert.True(direct.IccProfile.IsEmpty);
     }
 
     [Fact]
-    public void DefaultDecodeMatchesFullDecodeFor16BitPng()
+    public void DirectDecodeMatchesRasterDecodeFor16BitPng()
     {
         ushort[] samples = new ushort[4 * 3 * 4];
         for (int i = 0; i < samples.Length; i++)
@@ -319,24 +378,78 @@ public sealed class ImageTests
         byte[] png = PngWriter.EncodeRgba16(samples, 4, 3, new PngWriteOptions());
 
         using Image direct = Image.Load(png);
-        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+        using Canvas raster = ImageDecoderBridge.DecodeThroughRaster(png);
 
-        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.Equal(raster.Buffer, direct.Canvas.Buffer);
     }
 
     [Fact]
-    public void PngIccNeedsFullDecode()
+    public void LoadFromFileMatchesLoadFromMemory()
+    {
+        using Canvas source = Canvas.Create(5, 4);
+        for (int y = 0; y < source.Height; y++)
+        {
+            for (int x = 0; x < source.Width; x++)
+            {
+                source.SetColor(x, y, Color.FromRgba((byte)(x * 51), (byte)(y * 63), 7, (byte)(255 - (x * 17))));
+            }
+        }
+
+        byte[] icc = [1, 2, 3, 4, 5];
+        byte[] png = PngWriter.Encode(CopyToStraight(source), 5, 4, new PngWriteOptions { IccProfile = icc });
+
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"imgproc-{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(path, png);
+
+        try
+        {
+            using Image fromFile = Image.Load(path);
+            using Image fromMemory = Image.Load(png);
+
+            // 文件路径走 ImageDecoder.Open 的内存映射，结果必须和读进 byte[] 完全一致。
+            Assert.Equal(fromMemory.Canvas.Buffer, fromFile.Canvas.Buffer);
+            Assert.Equal(ImageFormat.Png, fromFile.SourceFormat);
+            Assert.Equal(icc, fromFile.IccProfile.ToArray());
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void PngIccComesFromHeader()
     {
         byte[] straight = new byte[2 * 2 * 4];
         byte[] icc = [1, 2, 3, 4, 5];
         byte[] png = PngWriter.Encode(straight, 2, 2, new PngWriteOptions { IccProfile = icc });
 
-        using Image direct = Image.Load(png);
-        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+        using Image image = Image.Load(png);
 
-        // 1.4 的 PngReader.ReadHeader 是 internal，直写路径拿不到 PNG 的 iCCP
-        Assert.True(direct.IccProfile.IsEmpty);
-        Assert.Equal(icc, full.IccProfile.ToArray());
+        // 2.0 的 TryReadMetadata 只扫 iCCP 段，PNG 的 ICC 不再需要完整解码。
+        Assert.Equal(icc, image.IccProfile.ToArray());
+    }
+
+    [Fact]
+    public void PngIccSurvivesAlphaPremultiply()
+    {
+        using Canvas source = Canvas.Create(2, 2);
+        source.SetColor(0, 0, Color.FromRgba(200, 100, 50, 128));
+        byte[] icc = [9, 8, 7];
+        byte[] png = PngWriter.Encode(CopyToStraight(source), 2, 2, new PngWriteOptions { IccProfile = icc });
+
+        using Image image = Image.Load(png);
+
+        Assert.Equal(icc, image.IccProfile.ToArray());
+
+        // 带 alpha 的图仍是「直写 + 本地预乘」，ICC 不该影响像素。
+        Color expected = source.GetColor(0, 0);
+        Color actual = image.Canvas.GetColor(0, 0);
+
+        Assert.Equal(expected.A, actual.A);
+        Assert.InRange(Math.Abs(expected.R - actual.R), 0, 1);
+        Assert.InRange(Math.Abs(expected.G - actual.G), 0, 1);
+        Assert.InRange(Math.Abs(expected.B - actual.B), 0, 1);
     }
 
     [Fact]
@@ -346,15 +459,13 @@ public sealed class ImageTests
         byte[] icc = [1, 2, 3, 4, 5];
         byte[] jpeg = JpegEncoder.Encode(straight, 16, 16, 3, new JpegEncodeOptions { IccProfile = icc });
 
-        using Image direct = Image.Load(jpeg);
-        using Image full = Image.Load(jpeg, new ImageDecodeOptions { RequireIccProfile = true });
+        using Image image = Image.Load(jpeg);
 
-        Assert.Equal(icc, direct.IccProfile.ToArray());
-        Assert.Equal(icc, full.IccProfile.ToArray());
+        Assert.Equal(icc, image.IccProfile.ToArray());
     }
 
     [Fact]
-    public void OpaqueJpegMatchesFullDecode()
+    public void OpaqueJpegMatchesRasterDecode()
     {
         byte[] rgb = new byte[16 * 16 * 3];
         for (int i = 0; i < rgb.Length; i++)
@@ -365,14 +476,14 @@ public sealed class ImageTests
         byte[] jpeg = JpegEncoder.Encode(rgb, 16, 16, 3, new JpegEncodeOptions());
 
         using Image direct = Image.Load(jpeg);
-        using Image full = Image.Load(jpeg, new ImageDecodeOptions { RequireIccProfile = true });
+        using Canvas raster = ImageDecoderBridge.DecodeThroughRaster(jpeg);
 
-        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.Equal(raster.Buffer, direct.Canvas.Buffer);
         Assert.True(direct.Canvas.IsFullyOpaque());
     }
 
     [Fact]
-    public void OpaqueRgbPngMatchesFullDecode()
+    public void OpaqueRgbPngMatchesRasterDecode()
     {
         byte[] rgb = new byte[16 * 16 * 3];
         for (int i = 0; i < rgb.Length; i++)
@@ -383,16 +494,20 @@ public sealed class ImageTests
         byte[] png = PngWriter.EncodeRgb8(rgb, 16, 16, new PngWriteOptions());
 
         using Image direct = Image.Load(png);
-        using Image full = Image.Load(png, new ImageDecodeOptions { RequireIccProfile = true });
+        using Canvas raster = ImageDecoderBridge.DecodeThroughRaster(png);
 
-        Assert.Equal(full.Canvas.Buffer, direct.Canvas.Buffer);
+        Assert.Equal(raster.Buffer, direct.Canvas.Buffer);
         Assert.True(direct.Canvas.IsFullyOpaque());
     }
 
-    private static byte[] EncodePng(Canvas canvas)
+    private static byte[] EncodePng(Canvas canvas) =>
+        PngWriter.Encode(CopyToStraight(canvas), canvas.Width, canvas.Height);
+
+    private static byte[] CopyToStraight(Canvas canvas)
     {
-        byte[] straight = new byte[canvas.Width * canvas.Height * Canvas.BytesPerPixel];
-        canvas.CopyToStraight(straight, canvas.Width * Canvas.BytesPerPixel);
-        return PngWriter.Encode(straight, canvas.Width, canvas.Height);
+        int stride = canvas.Width * Canvas.BytesPerPixel;
+        byte[] straight = new byte[stride * canvas.Height];
+        canvas.CopyToStraight(straight, stride);
+        return straight;
     }
 }

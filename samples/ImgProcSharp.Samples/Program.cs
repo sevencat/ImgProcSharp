@@ -1,5 +1,7 @@
 using System.Numerics;
 using ImgProcSharp;
+using Sdcb.SimdCodecs;
+using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
 
@@ -151,9 +153,7 @@ internal static class Program
                 new PathBuilder().MoveTo(486, 424).LineTo(630, 424).Build());
         });
 
-        byte[] straight = new byte[image.Width * image.Height * 4];
-        image.Canvas.CopyToStraight(straight, image.Width * 4);
-        Write(PngWriter.Encode(straight, image.Width, image.Height), "result.png", image.Width, image.Height);
+        Write(EncodePng(image.Canvas), "result.png", image.Width, image.Height);
     }
 
     /// <summary>
@@ -265,12 +265,9 @@ internal static class Program
                 new RectangularPolygon(0, 0, width, height));
         });
 
-        byte[] straight = new byte[width * height * 4];
-        photo.Canvas.CopyToStraight(straight, width * 4);
-
-        // JPEG 没有 alpha：直通像素按 4 通道喂进去，编码器忽略 alpha。
+        // JPEG 没有 alpha：不透明画布的预乘缓冲就是直通缓冲，直接按 4 通道喂给编码器。
         // ICC 原样带上，Display P3 / Adobe RGB 的照片重新编码后色彩空间不丢。
-        byte[] jpeg = JpegEncoder.Encode(straight, width, height, 4, new JpegEncodeOptions
+        byte[] jpeg = EncodeJpeg(photo.Canvas, new JpegEncodeOptions
         {
             Quality = 92,
             OptimizeHuffman = true,
@@ -334,13 +331,11 @@ internal static class Program
                 new RectangularPolygon(0.5f, 0.5f, sheet.Width - 1f, sheet.Height - 1f));
         });
 
-        byte[] straight = new byte[sheet.Width * sheet.Height * 4];
-        sheet.Canvas.CopyToStraight(straight, sheet.Width * 4);
-        Write(PngWriter.Encode(straight, sheet.Width, sheet.Height), "compare.png", sheet.Width, sheet.Height);
+        Write(EncodePng(sheet.Canvas), "compare.png", sheet.Width, sheet.Height);
 
         // README 首页展示的就是这张：JPEG 体积小，适合放进仓库当预览图
         Write(
-            JpegEncoder.Encode(straight, sheet.Width, sheet.Height, 4, new JpegEncodeOptions
+            EncodeJpeg(sheet.Canvas, new JpegEncodeOptions
             {
                 Quality = 90,
                 OptimizeHuffman = true,
@@ -429,14 +424,48 @@ internal static class Program
 
         });
 
-        byte[] straight = new byte[PhotoWidth * PhotoHeight * 4];
-        scene.Canvas.CopyToStraight(straight, PhotoWidth * 4);
-
-        return JpegEncoder.Encode(straight, PhotoWidth, PhotoHeight, 4, new JpegEncodeOptions
+        return EncodeJpeg(scene.Canvas, new JpegEncodeOptions
         {
             Quality = 88,
             OptimizeHuffman = true,
         });
+    }
+
+    /// <summary>
+    /// 画布 → PNG。不透明画布的预乘缓冲逐字节就是直通缓冲，直接把 <see cref="Canvas.Buffer"/> 交给
+    /// <see cref="PngWriter"/>（不摊整图数组），并让 <c>DiscardAlpha</c> 把 alpha 通道挡在 deflate 之外；
+    /// 带透明的画布交给 2.0 的编码门面，它一边把预乘还原成直通一边编。
+    /// </summary>
+    private static byte[] EncodePng(Canvas canvas)
+    {
+        ReadOnlySpan<byte> pixels = canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height);
+
+        return canvas.Stride == canvas.Width * Canvas.BytesPerPixel && canvas.IsFullyOpaque()
+            ? PngWriter.Encode(pixels, canvas.Width, canvas.Height, new PngWriteOptions { DiscardAlpha = true })
+            : ImageCodecs.Encode(
+                pixels,
+                canvas.Width,
+                canvas.Height,
+                PixelFormat.Rgba32Premultiplied,
+                ImageFormat.Png,
+                stride: canvas.Stride);
+    }
+
+    /// <summary>画布 → JPEG，判断同上：JPEG 没有 alpha，不透明时零拷贝，否则由编码门面还原预乘。</summary>
+    private static byte[] EncodeJpeg(Canvas canvas, JpegEncodeOptions options)
+    {
+        ReadOnlySpan<byte> pixels = canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height);
+
+        return canvas.Stride == canvas.Width * Canvas.BytesPerPixel && canvas.IsFullyOpaque()
+            ? JpegEncoder.Encode(pixels, canvas.Width, canvas.Height, 4, options)
+            : ImageCodecs.Encode(
+                pixels,
+                canvas.Width,
+                canvas.Height,
+                PixelFormat.Rgba32Premultiplied,
+                ImageFormat.Jpeg,
+                stride: canvas.Stride,
+                options: options);
     }
 
     private static void Write(byte[] encoded, string fileName, int width, int height)
