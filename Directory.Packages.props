@@ -5,8 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 只用于解码；输出 PNG 由调用方直接用它的 PngWriter（misc §B / §Q） -->
-    <PackageVersion Include="Sdcb.SimdCodecs" Version="2.0.0" />
+    <!-- 主库只依赖契约层；格式解码器/编码器由上层按需引用（misc §B / §Q / §AB） -->
+    <PackageVersion Include="Sdcb.SimdCodecs.Abstractions" Version="2.0.0" />
+    <PackageVersion Include="Sdcb.SimdCodecs.Png" Version="2.0.0" />
+    <PackageVersion Include="Sdcb.SimdCodecs.Jpeg" Version="2.0.0" />
 
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.2" />
 

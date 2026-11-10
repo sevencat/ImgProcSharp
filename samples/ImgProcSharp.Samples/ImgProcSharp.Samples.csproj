@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Sdcb.SimdCodecs.Png" />
+    <PackageReference Include="Sdcb.SimdCodecs.Jpeg" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\ImgProcSharp.SimdCodecs\ImgProcSharp.SimdCodecs.csproj" />
   </ItemGroup>
 

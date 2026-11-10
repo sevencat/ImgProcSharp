@@ -6,9 +6,9 @@ namespace ImgProcSharp;
 /// <summary>
 /// 一张可绘制的图：解码后的 <see cref="Canvas"/> 加上它的来源信息。
 /// <para>
-/// v1 不提供 <c>Save</c>：输出编码不在本库范围内。Sdcb.SimdCodecs 2.0 之后调用方可以一步把画布喂给
-/// <c>ImageCodecs.Encode(..., PixelFormat.Rgba32Premultiplied, ...)</c>，也可以在不透明时直接把
-/// <see cref="Canvas.Buffer"/> 交给 <c>PngWriter</c>（预乘即直通），见 README。
+/// v1 不提供 <c>Save</c>：输出编码不在本库范围内。不透明画布可以把
+/// <see cref="Canvas.Buffer"/> 直接交给 <c>PngWriter</c> / <c>JpegEncoder</c>（预乘即直通）；
+/// 带透明的画布先 <see cref="Canvas.CopyToStraight(Span{byte}, int, bool?)"/> 再编，见 README。
 /// </para>
 /// </summary>
 public sealed class Image : IDisposable

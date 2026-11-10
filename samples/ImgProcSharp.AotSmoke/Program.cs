@@ -1,5 +1,6 @@
 using System.Numerics;
 using ImgProcSharp;
+using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Png;
 
 // AOT 冒烟：把「裁剪 + 变换 + 渐变 + 描边 + 文字 + PNG 往返」跑一遍，
@@ -11,6 +12,10 @@ using Sdcb.SimdCodecs.Png;
 //   dims=320x200 png=10413 render=C763804986BB6615 decode=C763804986BB6615 ink=54828
 // （0.2 的渐变行游标优化之后的值；差分累计与逐像素重算最多差 1 LSB，见 misc §AA）
 // 实测 win-x64 自包含 exe 约 9.8 MB（内嵌字体是主要体积来源）。
+
+// 主库只依赖 Abstractions：这个冒烟只用 PNG，就只登记 PNG 的解码器和编码器
+CodecRegistry.Register(PngImageDecoder.Registration);
+EncoderRegistry.Register(PngImageEncoder.Registration);
 
 using Image image = Image.Create(320, 200, Color.White);
 
@@ -32,6 +37,15 @@ image.Mutate(context => context
 byte[] straight = new byte[image.Width * image.Height * 4];
 image.Canvas.CopyToStraight(straight, image.Width * 4);
 byte[] png = PngWriter.Encode(straight, image.Width, image.Height);
+
+// 导出走注册表（EncoderRegistry + 扩展方法）：不透明画布上应与 PngWriter 直接编码逐字节相同。
+// 这一条同时验证 AOT 下「按格式查注册表 + 调编码器委托 + 会话式写入」整条链路可用。
+byte[] viaRegistry = image.Canvas.Encode(ImageFormat.Png);
+if (!viaRegistry.AsSpan().SequenceEqual(png))
+{
+    Console.Error.WriteLine("EncoderRegistry 路径与 PngWriter 的输出不一致。");
+    return 1;
+}
 
 using Image decoded = Image.Load(png);
 byte[] decodedStraight = new byte[decoded.Width * decoded.Height * 4];

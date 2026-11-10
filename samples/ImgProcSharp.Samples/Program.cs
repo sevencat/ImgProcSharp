@@ -1,6 +1,5 @@
 using System.Numerics;
 using ImgProcSharp;
-using Sdcb.SimdCodecs;
 using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
@@ -17,7 +16,9 @@ namespace ImgProcSharp.Samples;
 /// <item><c>output/compare.png</c>：原图与处理后的成品左右拼成一张对比图。</item>
 /// </list>
 /// <para>
-/// 编码不在本库范围内：出 PNG 用 <see cref="PngWriter"/>，出 JPEG 用 <see cref="JpegEncoder"/>，都由调用方直接调。
+/// 编码不在本库范围内：这里只登记 <see cref="PngImageEncoder"/> / <see cref="JpegImageEncoder"/>，
+/// 之后一行 <see cref="ImageExportExtensions.Save(Image, string, EncodeOptions?)"/> 或
+/// <see cref="ImageExportExtensions.Encode(Canvas, ImageFormat, EncodeOptions?, ImageMetadata?)"/> 就出图。
 /// 输入优先用 <c>samples/assets/sample.jpg</c>，没有就现场合成一张照片再编码成 JPEG——两条路走同一段解码代码。
 /// </para>
 /// </summary>
@@ -37,6 +38,10 @@ internal static class Program
 
     private static void Main()
     {
+        // 主库只依赖 Abstractions：这里登记本次运行真正需要的编解码器（导出也一样，一行 Save）
+        CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration);
+        EncoderRegistry.Register(PngImageEncoder.Registration, JpegImageEncoder.Registration);
+
         Directory.CreateDirectory("output");
 
         RenderPoster();
@@ -432,41 +437,17 @@ internal static class Program
     }
 
     /// <summary>
-    /// 画布 → PNG。不透明画布的预乘缓冲逐字节就是直通缓冲，直接把 <see cref="Canvas.Buffer"/> 交给
-    /// <see cref="PngWriter"/>（不摊整图数组），并让 <c>DiscardAlpha</c> 把 alpha 通道挡在 deflate 之外；
-    /// 带透明的画布交给 2.0 的编码门面，它一边把预乘还原成直通一边编。
+    /// 画布 → PNG：一行扩展方法。预乘缓冲直接交给编码器（转换在编码器内部做，半透明图也不摊临时数组），
+    /// 只在全不透明时顺带用 <c>DiscardAlpha</c> 把 alpha 通道挡在 deflate 之外。
     /// </summary>
-    private static byte[] EncodePng(Canvas canvas)
-    {
-        ReadOnlySpan<byte> pixels = canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height);
+    private static byte[] EncodePng(Canvas canvas) =>
+        canvas.Encode(
+            ImageFormat.Png,
+            canvas.IsFullyOpaque() ? new PngWriteOptions { DiscardAlpha = true } : null);
 
-        return canvas.Stride == canvas.Width * Canvas.BytesPerPixel && canvas.IsFullyOpaque()
-            ? PngWriter.Encode(pixels, canvas.Width, canvas.Height, new PngWriteOptions { DiscardAlpha = true })
-            : ImageCodecs.Encode(
-                pixels,
-                canvas.Width,
-                canvas.Height,
-                PixelFormat.Rgba32Premultiplied,
-                ImageFormat.Png,
-                stride: canvas.Stride);
-    }
-
-    /// <summary>画布 → JPEG，判断同上：JPEG 没有 alpha，不透明时零拷贝，否则由编码门面还原预乘。</summary>
-    private static byte[] EncodeJpeg(Canvas canvas, JpegEncodeOptions options)
-    {
-        ReadOnlySpan<byte> pixels = canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height);
-
-        return canvas.Stride == canvas.Width * Canvas.BytesPerPixel && canvas.IsFullyOpaque()
-            ? JpegEncoder.Encode(pixels, canvas.Width, canvas.Height, 4, options)
-            : ImageCodecs.Encode(
-                pixels,
-                canvas.Width,
-                canvas.Height,
-                PixelFormat.Rgba32Premultiplied,
-                ImageFormat.Jpeg,
-                stride: canvas.Stride,
-                options: options);
-    }
+    /// <summary>画布 → JPEG：同样一行；<see cref="JpegEncodeOptions"/> 原样透传。</summary>
+    private static byte[] EncodeJpeg(Canvas canvas, JpegEncodeOptions options) =>
+        canvas.Encode(ImageFormat.Jpeg, options);
 
     private static void Write(byte[] encoded, string fileName, int width, int height)
     {

@@ -11,8 +11,11 @@ namespace ImgProcSharp.Benchmarks;
 /// </summary>
 internal static class BenchmarkProgram
 {
-    private static void Main(string[] args) =>
+    private static void Main(string[] args)
+    {
+        CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration);
         BenchmarkSwitcher.FromAssembly(typeof(BenchmarkProgram).Assembly).Run(args);
+    }
 }
 
 /// <summary>填充吞吐：纯色走矩形快路径，渐变走逐像素采样。</summary>

@@ -17,9 +17,13 @@ dotnet add package Sevencat.ImgproSharp
 
 ```csharp
 using ImgProcSharp;
-using Sdcb.SimdCodecs;
 using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
+using Sdcb.SimdCodecs.Png;
+
+// 本库只依赖 Abstractions：能读写哪些格式，由你注册的编解码器决定（见「格式：自己选，自己注册」）
+CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration);
+EncoderRegistry.Register(PngImageEncoder.Registration, JpegImageEncoder.Registration);
 
 using var image = Image.Load("in.jpg");
 image.Mutate(x => x
@@ -29,33 +33,27 @@ image.Mutate(x => x
 // 图片来源信息顺带带出
 Console.WriteLine($"{image.SourceFormat} {image.Width}×{image.Height}, EXIF {image.Orientation}");
 
-// v1 不自带存图：Sdcb.SimdCodecs 2.0 的门面一行编码，预乘画布直接喂，
-// 不用先摊一张直通 RGBA（编码器边还原预乘边编）
-File.WriteAllBytes(
-    "out.png",
-    ImageCodecs.Encode(
-        image.Canvas.Buffer, image.Width, image.Height,
-        PixelFormat.Rgba32Premultiplied, ImageFormat.Png, stride: image.Canvas.Stride));
+// 导出：扩展名决定格式，一行写完（半透明图也不用手工摊直通缓冲，转换在编码器内部做）
+image.Save("out.png");
+image.Save("out.jpg", new JpegEncodeOptions { Quality = 92 });   // JPEG 没有 alpha，第 4 通道被忽略
 
-// JPEG 同理，quality 1..100
-File.WriteAllBytes(
-    "out.jpg",
-    ImageCodecs.Encode(
-        image.Canvas.Buffer, image.Width, image.Height,
-        PixelFormat.Rgba32Premultiplied, ImageFormat.Jpeg, stride: image.Canvas.Stride,
-        options: new JpegEncodeOptions { Quality = 92 }));
+// 要内存里的字节而不是文件时：
+byte[] png = image.Encode(ImageFormat.Png);
+byte[] jpg = image.Canvas.Encode(ImageFormat.Jpeg, new JpegEncodeOptions { Quality = 92 });   // 只给画布也行
 ```
 
 ## Status
 
-`0.2.0` — work in progress, API 尚未稳定。
+`0.2.1` — work in progress, API 尚未稳定。
 
-- 输入：`Sdcb.SimdCodecs` 2.0 能解的所有格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm / ICO / JPEG 2000 / JBIG2）。
-- 输出：**本库不提供 `Save`**。PNG 用 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 用 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`，或一步走 `ImageCodecs.Encode`（都在 2.0 里，随元包传递引用）；其余格式（WebP 等）等 0.3（见 `plan.md` §Q）。
+- 输入：**由你注册的解码器决定**。本库只依赖 `Sdcb.SimdCodecs.Abstractions`，引用哪个格式包、注册哪个解码器，就解哪种格式（PNG / JPEG / WebP / GIF / BMP / TIFF / QOI / Netpbm / ICO / JPEG 2000 / JBIG2 各有独立的包），包体积只算你选的。
+- 输出：**一行 `Save` / `Encode`**（0.2.1 起）——本库只调 `Abstractions` 的编码契约，PNG / JPEG 的实现仍由你引用格式包并 `EncoderRegistry.Register` 登记；其余格式（WebP / TIFF / GIF 等）等 0.4（见 `plan.md` §Q）。
 - 8 位 RGBA，内部预乘 alpha；不做 ICC 色彩管理（ICC 原样写回 PNG 的 `iCCP`；2.0 起任何格式的 ICC 都只扫文件头就能拿到）。
 - 绘制：填充（纯色 / 线性渐变 / 径向渐变 / 图案）、描边（Miter/Bevel/Round 连接、Butt/Round/Square 端点、`MiterLimit`、虚线）、`Matrix3x2` 变换（笔刷、线宽与虚线同步跟随）、路径裁剪、TrueType 文字（掩码快路径 + 轮廓慢路径）。
 - 文字：内嵌文泉驿微米黑（2 MB gzip），无 kerning / 无 GSUB / 无双向文本 / 无彩色 emoji。
-- 还没做（0.3）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。
+- 还没做（0.4）：混合模式、图层；非等比缩放下用椭圆笔尖（现在取几何平均线宽）。差距表见 `misc.md` §I、§X、§Z、§Y。
+
+0.2.1 相对 0.2.0：依赖从元包 `Sdcb.SimdCodecs` 收窄到 `Sdcb.SimdCodecs.Abstractions`，格式编解码器改由上层注册——`Image.Load` 之前加一行 `CodecRegistry.Register(PngImageDecoder.Registration, ...)` 即可，未注册时抛 `InvalidDataException` 并说明缺什么。**这是破坏性变更**：升级后必须显式注册，否则一张图都解不了；换来的是包里不再躺着你用不到的 WebP/TIFF/JPEG 2000。同时补上了 `Image.Save` / `Canvas.Save` / `Encode` 这组扩展方法（同样基于注册表），导出不再需要自己写 `Create`/`AddFrame`/`WriteRows`/`Commit` 样板。
 
 0.2.0 相对 0.1.0：依赖升到 `Sdcb.SimdCodecs` 2.0.0（`Image.Load(path)` 改内存映射、任何格式的 ICC 都从文件头免费拿到），`ImageDecodeOptions.RequireIccProfile` 已失效（标 `[Obsolete]`，源码兼容），其余 API 不变。
 
@@ -173,15 +171,75 @@ docs/                                README 首页预览图（compare.jpg，示�
 本库只负责「画」，读和写都交给 [Sdcb.SimdCodecs](https://github.com/sdcb/SimdCodecs)。这个包值得单独夸几句——它把一个通常要靠 libjpeg / libpng / libwebp 三件套才敢接的活儿，用纯 C# 做完了：
 
 - **纯托管，但是真 SIMD。** 名字不是噱头：JPEG 的 IDCT、YCbCr→RGBA、色度上采样，PNG 的反滤波与 RGBA8 展开，WebP 的 VP8/VP8L 重建与环路滤波，BMP/PNM 的像素搬运，全是手写的 `Vector128/256/512` 内核。于是没有 P/Invoke、没有随包发布的原生库，`PublishAot` 出来的 win-x64 自包含单文件约 9.8 MB 里就装着全套编解码器（见 `samples/ImgProcSharp.AotSmoke`：JIT 与 AOT 输出逐字节一致）。
-- **一个门面，十二个格式子包。** PNG（含 APNG）、JPEG（基线 / 渐进 / 无损 / gain map）、WebP（VP8 + VP8L）、GIF、BMP、TIFF、ICO / CUR、QOI、PNM 家族（PBM / PGM / PPM / PAM / PFM）、JPEG 2000、JBIG2。格式靠 magic byte 嗅探，不看扩展名；解码、编码、元数据是同一个 `ImageCodecs` 类上的几个方法，`dotnet add package Sdcb.SimdCodecs` 一行带走全部。
+- **一个门面，十二个格式子包。** PNG（含 APNG）、JPEG（基线 / 渐进 / 无损 / gain map）、WebP（VP8 + VP8L）、GIF、BMP、TIFF、ICO / CUR、QOI、PNM 家族（PBM / PGM / PPM / PAM / PFM）、JPEG 2000、JBIG2。格式靠 magic byte 嗅探，不看扩展名；门面 `ImageCodecs` 加元包能一行带走全部，但**子包互不依赖、也不依赖元包**——本库因此只引契约层 `Abstractions`，用哪个格式由你引子包并注册（见下一节）。
 - **解码不多拷一次。** `TryDecodeInto(data, dest, stride, PixelFormat)` 让解码器直接写进调用方的缓冲（JPEG 那条路径是字面意义的零拷贝）。本库的画布就是那块缓冲——所以「解码」实际上不在本库的耗时里。
 - **元数据不要钱。** `TryReadMetadata` 只扫文件头就给出 ICC / EXIF / XMP，不为了一段 ICC 去解 12 MP 的像素。本库正是靠它把「直写解码」和「读 ICC」这两件原本互斥的事同时做到（见 `plan.md` §12.2-14）。
-- **文件不从托管堆过。** `ImageDecoder.Open(path)` 走内存映射，编码字节按页喂给解码器；12 MP 的 JPEG 不再需要一次 5–10 MB 的托管分配。
+- **文件不从托管堆过。** `ByteSource.FromFile(path)` 把文件内存映射进来，编码字节按页喂给解码器；12 MP 的 JPEG 不再需要一次 5–10 MB 的托管分配。这个类型就在 `Abstractions` 里，所以本库不引元包也照样零拷贝。
 - **缩放解码是真的省算力。** JPEG 能在 DCT 域直接出 1/2…1/8 的图——出 1/8 缩略图时省掉 98% 的像素计算，而不是「先解 12 MP 再缩」。
-- **编码端同样齐。** `PngWriter`（自适应滤波、`DiscardAlpha`）、`JpegEncoder`（质量、优化 Huffman、渐进）、统一出口 `ImageCodecs.Encode`（`byte[]` / `Stream` / `IBufferWriter` 三选一）。本库测试与示例的输出全靠它，一行 `PackageReference` 就够，不必内嵌任何 dll；`DiscardAlpha` 让不透明图少一行整图拷贝、少喂 deflate 四分之一的输入，800×600 实测 184.8 → 149.7 ms。
+- **编码端同样齐。** `PngWriter`（自适应滤波、`DiscardAlpha`）、`JpegEncoder`（质量、优化 Huffman、渐进），都在各自的格式包里；本库测试与示例的输出全靠它们，不必内嵌任何 dll。`DiscardAlpha` 让不透明图少一行整图拷贝、少喂 deflate 四分之一的输入，800×600 实测 184.8 → 149.7 ms。
 - **保真层也没放弃。** 除了 8 位 RGBA 的 display tier，`IDecodedImage` 还保留原生位深、`ColorEncoding` 与 `ToFloats()` 的 float32 视图——16 位 PNG、HDR JPEG 这类图不会在门面里被悄悄压成 8 位。
 
-MIT 许可，作者 [sdcb](https://github.com/sdcb)。本项目对它的全部依赖就是 `ImageDecoderBridge.cs` 一个文件 + 调用方那几行 `ImageCodecs.Encode`。
+MIT 许可，作者 [sdcb](https://github.com/sdcb)。本项目对它的全部依赖就是 `Abstractions` 的登记契约——`ImageDecoderBridge.cs`、`CodecRegistry.cs`、`EncoderRegistry.cs`、`ImageExportExtensions.cs`，一行格式实现都不抄。
+
+## 格式：自己选，自己注册
+
+本库只依赖契约层 `Sdcb.SimdCodecs.Abstractions`（0.16 MB：解码器/编码器注册描述、`ByteSource`、`IDecodedImage`、`PixelFormat`），**一个格式实现都不带**。用哪个格式就引哪个子包，再登记一次：
+
+```csharp
+using ImgProcSharp;
+using Sdcb.SimdCodecs.Abstractions;
+using Sdcb.SimdCodecs.Jpeg;
+using Sdcb.SimdCodecs.Png;
+
+// 读：按注册顺序嗅探
+CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration);
+// 写：一个格式一个编码器，同格式重复注册即替换
+EncoderRegistry.Register(PngImageEncoder.Registration, JpegImageEncoder.Registration);
+```
+
+`Image.Load` / `Save` 之前调一次即可。注册是进程级、线程安全的（写时复制，编解码与注册可并发）；测试项目适合放 `[ModuleInitializer]`，控制台程序放 `Main` 第一行。
+
+| 引的包 | 拿到什么 | dll |
+|---|---|---|
+| `Sdcb.SimdCodecs.Abstractions` | 本库自动带 | 0.16 MB |
+| `Sdcb.SimdCodecs.Png` | PNG（含 APNG）+ `Color.Icc` | 0.34 + 0.05 MB |
+| `Sdcb.SimdCodecs.Jpeg` | JPEG（基线 / 渐进 / 无损） | 0.40 MB |
+| `Sdcb.SimdCodecs.Jpeg.GainMap` | Ultra HDR gain map | 0.09 MB |
+| `.Webp` / `.Gif` / `.Tiff` / `.Bmp` / `.Ico` / `.Qoi` / `.Pnm` / `.Jpeg2000` / `.Jbig2` | 各自格式 | 0.06–0.65 MB |
+
+只 PNG + JPEG ≈ 0.95 MB，全套 12 个格式 ≈ 3.1 MB。**没引的解码器不会进包**——这正是本库不在 NuGet 依赖里绑死格式的原因：`0.2.0` 依赖元包时，产物里躺着 WebP/TIFF/JPEG 2000 的解码器，哪怕你只发 PNG。
+
+**不注册会怎样？** 解码当场失败，消息直接告诉你缺什么：
+
+```
+InvalidDataException: 没有注册任何解码器：先引用所需的格式包（如 Sdcb.SimdCodecs.Png、Sdcb.SimdCodecs.Jpeg），
+再在启动时调用 CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration)。
+```
+
+注册了、但数据不属于任何已注册格式，则报「无法识别的图像格式」。所以「只支持 PNG」不需要额外白名单——不引 JPEG 包、不注册 JPEG 解码器就够了。
+
+**顺序有讲究。** 先注册的先生效（嗅探顺序 = 注册顺序）。`GainMapImageDecoder` 必须排在 `JpegImageDecoder` 之前：两者都从 `FF D8 FF` 开始，前者只认真正带 HDR gain map 的 JPEG，其余的继续落到普通解码器。
+
+**HEIF** 因 HEVC 专利不在元包的 12 个里，装 `Sdcb.SimdCodecs.Heif` 后同样一行 `CodecRegistry.Register(HeifImageDecoder.Registration)`。
+
+**导出也是一行。** 登记编码器之后：
+
+```csharp
+image.Save("out.png");                                          // 扩展名决定格式
+image.Save("out.jpg", new JpegEncodeOptions { Quality = 92 });  // 选项原样透传给编码器
+byte[] bytes = image.Canvas.Encode(ImageFormat.Png);            // 只要字节，不要文件
+```
+
+画布是预乘 RGBA8，`Encode` / `Save` 直接把 `Buffer` + 自己的 stride 交给编码器（`PixelFormat.Rgba32Premultiplied`），unpremultiply 在编码器内部完成——半透明图不用先摊一张 `W*H*4` 的直通数组。实测与「`CopyToStraight` + `PngWriter.Encode`」逐字节相同；传给编码器的 stride 就是画布的 stride，行尾 padding 不会被当像素。显式格式优先于扩展名（`Save(path, ImageFormat.Png)`），扩展名不认识时抛 `NotSupportedException` 并给出写法。图片的 ICC 配置随 `ImageMetadata` 一起写回（`Image.Save` / `Encode` 自动带上，`Canvas` 版本需自己传 `metadata`）。
+
+**没登记编码器的格式**，导出时报：
+
+```
+NotSupportedException: 没有能写 Webp 的编码器：已注册的编码器只覆盖 Png / Jpeg，
+引用该格式的包后调用 EncoderRegistry.Register(...) 登记它的 Registration 即可。
+```
+
+**与元包门面等价。** 本库走的就是门面内部那套委托（`CanDecode` / `TryReadInfo` / `TryDecodeInto` / `TryReadMetadata` 与编码的 `Create` / `AddFrame` / `WriteRows` / `Commit`），实测 960×540 PNG 与 1280×720 JPEG 的像素与 `ImageCodecs.TryDecodeInto` 逐字节相同（`05351D46E4A206EA` / `83A13183B9AE4BE5`）；文件路径走 `ByteSource.FromFile` 内存映射。`CodecRegistry` / `EncoderRegistry` 也不限于官方包：任何符合 `ImageDecoderRegistration` / `ImageEncoderRegistration` 契约的实现，登记后都能用。
 
 ## Docs
 

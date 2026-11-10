@@ -1,5 +1,4 @@
 using System.Numerics;
-using Sdcb.SimdCodecs;
 using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
@@ -54,15 +53,10 @@ public sealed class ImageTests
         source.SetColor(1, 1, Color.Red);
         source.SetColor(2, 1, Color.Blue);
 
-        // 带透明画布的推荐保存方式：预乘缓冲直接喂编码门面，不摊一张直通数组
-        byte[] png = ImageCodecs.Encode(
-            source.Buffer,
-            source.Width,
-            source.Height,
-            PixelFormat.Rgba32Premultiplied,
-            ImageFormat.Png,
-            stride: source.Stride,
-            cancellationToken: TestContext.Current.CancellationToken);
+        // 带透明画布的保存方式：先摊成直通 RGBA8，再交给 PngWriter（编码器只吃直通像素）
+        byte[] straight = new byte[source.Width * source.Height * 4];
+        source.CopyToStraight(straight, source.Width * 4, assumeOpaque: false);
+        byte[] png = PngWriter.Encode(straight, source.Width, source.Height);
 
         using Image image = Image.Load(png);
 

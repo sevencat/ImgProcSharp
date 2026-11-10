@@ -2,7 +2,7 @@
 
 目标：给 `Sdcb.SimdCodecs` 补一个「画」的能力——读一张图，在图上画形状、渐变、文字，再存成另一张图。字体渲染直接采用 `F:\code\zlmsharp\src\GlyphRaster` 的代码；绘图核心不依赖任何编解码库，编解码只由外层薄门面负责。
 
-**输入**用 `Sdcb.SimdCodecs`（NuGet 2.0.0，PNG/JPEG/WebP/GIF/BMP/TIFF/QOI/Netpbm，另加 ICO/JPEG 2000/JBIG2 全能解）。**v1 不提供存图 API**：2.0 自带 `Sdcb.SimdCodecs.Png.PngWriter`、`Sdcb.SimdCodecs.Jpeg.JpegEncoder` 与统一门面 `ImageCodecs.Encode(...)`（公开、随元包传递引用），需要输出时由调用方直接调，本库不重复造编码器，也不把编码器放进公开 API。
+**输入**用 `Sdcb.SimdCodecs` 的格式包（NuGet 2.0.0，PNG/JPEG/WebP/GIF/BMP/TIFF/QOI/Netpbm/ICO/JPEG 2000/JBIG2 各一个包）。本库自身只依赖契约层 `Sdcb.SimdCodecs.Abstractions`，能读写哪些格式由调用方注册编解码器决定（`CodecRegistry.Register(...)` / `EncoderRegistry.Register(...)`，0.2.1 起）。**v1 不自研编码器**：公开 API 只有 `Image.Save` / `Canvas.Save` / `Encode` 这组扩展方法，内部调 `ImageEncoderRegistration` 的委托，PNG/JPEG 的实现仍来自调用方引用的格式包。
 
 决策、许可、算法笔记、未决问题等统统在 [`misc.md`](misc.md)，本文只放计划本身。
 
@@ -15,11 +15,11 @@
 1. **画布**：从解码后的像素建画布，或从零创建；支持 alpha 合成。
 2. **图形**：矩形、圆角矩形、椭圆/圆、多边形、折线、任意贝塞尔路径；填充与描边；纯色、线性渐变、径向渐变、图案笔刷。
 3. **文字**：中文/英文按字号绘制，可换行、可测量、可描边；字体直接复用 GlyphRaster（含内嵌文泉驿微米黑，免配置可用）。
-4. **解码 → 绘制**：`Image.Load("in.jpg")` → `Mutate(...)` 画 → 拿 `Canvas` 走自己的编码（测试里用 `PngWriter`）。输入格式随 SimdCodecs（八种），**v1 不承诺输出**。
+4. **解码 → 绘制 → 导出**：`Image.Load("in.jpg")` → `Mutate(...)` 画 → `image.Save("out.png")`（0.2.1 起的扩展方法，底下调已注册的编码器）。输入输出格式都随调用方注册的格式包。
 
 ### 非目标（v1 明确不做）
 
-- **输出编码**：v1 的公开 API 里没有 `Save`/`EncodePng`。PNG 调 `Sdcb.SimdCodecs.Png.PngWriter`、JPEG 调 `Sdcb.SimdCodecs.Jpeg.JpegEncoder`，或者一步走 `ImageCodecs.Encode(pixels, w, h, PixelFormat.Rgba32Premultiplied, format, stride)`（都在 2.0.0 里）；WebP 等其他输出等 0.3 再议（misc §Q）。
+- **编码器实现**：本库不自研编码器，也不引用任何格式实现包；公开 API 里只有「按格式查 `EncoderRegistry` 并调 `Abstractions` 的编码契约」的扩展方法（`Image.Save` / `Canvas.Save` / `Encode`，0.2.1 起），具体性能与压缩率由调用方登记的子包决定。WebP 等其他输出等 0.4 再议（misc §Q）。
 - 色彩管理：不做 ICC/primaries 转换，解码按「display tier」8 位 RGBA 直接画（见 misc §K）。
 - 文字的复杂排版：无 kerning、无 GSUB/整形、无双向文本、无彩色 emoji（GlyphRaster 现状，见 misc §I）。
 - 动画/多帧编辑：只处理首帧。
@@ -32,7 +32,7 @@
 
 | 产物 | 说明 |
 |---|---|
-| `ImgProcSharp`（NuGet，net10.0） | 唯一对外发布的包。内含绘图核心源码 + GlyphRaster 源码 + 内嵌字体 + 解码桥；`Sdcb.SimdCodecs` 只用于解码，编码不进包 |
+| `ImgProcSharp`（NuGet，net10.0） | 唯一对外发布的包。内含绘图核心源码 + GlyphRaster 源码 + 内嵌字体 + 解码桥；只依赖 `Sdcb.SimdCodecs.Abstractions`（解码契约），格式实现与编码器都不进包 |
 | `ImgProcSharp.Core`（net8.0;net10.0） | 开发与测试用工程，`IsPackable=false`，不单独发布（方案 A） |
 | `samples/ImgProcSharp.Samples` | 控制台示例：矢量海报 → `output/result.png`；照片管线（JPEG 解码 → 标注 → 编码）→ `output/photo.jpg` + 原图/成品对比拼图 `output/compare.png|jpg`（JPG 版复制到 `docs/compare.jpg` 作 README 首页图） |
 | `tests/ImgProcSharp.Core.Tests`（net8+net10） | 几何、光栅化、混合、文字 |
@@ -187,7 +187,7 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Sdcb.SimdCodecs" />   <!-- 版本在 Directory.Packages.props（CPM） -->
+    <PackageReference Include="Sdcb.SimdCodecs.Abstractions" />   <!-- 只引契约层；版本在 Directory.Packages.props（CPM） -->
   </ItemGroup>
 </Project>
 ```
@@ -196,7 +196,7 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 
 - 绝不写 `ProjectReference` 指向核心工程——那就是「引用 dll」了。`Compile Include` 才是把源码编进本程序集的正确做法。
 - 同一批 .cs 会在 net8 与 net10 两次构建里各编一份，`#if NET10_0_OR_GREATER` 天然分叉。
-- `Sdcb.SimdCodecs` 固定 **2.0.0**（2026-11 已发版）。解码只经 `ImageDecoderBridge.cs`；输出的 PNG 由调用方走它自带的 `PngWriter`/`ImageCodecs.Encode`（见 misc §B / §Q）。
+- `Sdcb.SimdCodecs.*` 固定 **2.0.0**（2026-11 已发版）。本库只引 `Abstractions`，解码只经 `ImageDecoderBridge.cs` + `CodecRegistry`；输出由调用方走子包的 `PngWriter`/`JpegEncoder`（见 misc §B / §Q）。
 - 开 `ManagePackageVersionsCentrally`，包版本只在 `Directory.Packages.props` 出现一次；`PackageReference` 上不写 `Version`（写了会报 NU1008）。
 - 嵌入资源不会随 `Compile` 一起带过来，必须再引一次，且 `LogicalName` 与代码里的常量严格一致（编译期查不出来）。
 - 核心工程与打包工程的程序集名必须不同（`ImgProcSharp.Core` vs `ImgProcSharp`），且核心工程永不发布，避免消费者同时拿到两份同名类型（`CS0433`）。
@@ -235,10 +235,11 @@ benchmarks/ImgProcSharp.Benchmarks/Program.cs              BDN：填充/描边/�
 
 ```
 Image.Load("in.jpg")                              [ext: ImageDecoderBridge]
+  ├─ CodecRegistry.Find(data) → 命中的 ImageDecoderRegistration（未注册则抛 InvalidDataException）
   ├─ TryReadInfo → 尺寸/Format/Orientation
   ├─ TryReadMetadata → ICC（任何格式都只扫元数据段，不碰像素）
-  ├─ 默认：TryDecodeInto(画布缓冲, Rgba32) → 带 alpha 才 premultiply
-  │    └─ 文件路径：ImageDecoder.Open(path) 内存映射 → frame.CopyPixels(画布缓冲)
+  ├─ 默认：registration.TryDecodeInto(画布缓冲, Rgba32) → 带 alpha 才 premultiply
+  │    └─ 文件路径：ByteSource.FromFile(path) 内存映射 → 同一条路径
   └─ 回退：TryDecode/TryCopyTo → 逐行转换进 Canvas → premultiply
   └─ Canvas(预乘 Rgba32) → Image
 
@@ -246,10 +247,11 @@ image.Mutate(x => x.Resize(...).Fill(brush, path).DrawText(options, text, at))  
   └─ DrawingContext: clip → 路径 flatten → ScanlineRasterizer → A8 coverage
   └─ brush 采样 + coverage 混合（按行，标量 + SIMD）
 
-Canvas → PNG/JPEG（调用方/测试侧，不在本库 API 里）
-  ├─ 不透明：PngWriter.Encode(canvas.Buffer, w, h, DiscardAlpha)  ← 预乘即直通，零拷贝
-  │           / JpegEncoder.Encode(canvas.Buffer, w, h, 4, options)
-  └─ 带透明：ImageCodecs.Encode(canvas.Buffer, w, h, Rgba32Premultiplied, format, stride)
+image.Save("out.png") / image.Encode(ImageFormat.Jpeg, options)   [ext: ImageExportExtensions]
+  ├─ EncoderRegistry.Require(format) → ImageEncoderRegistration（未注册则抛 NotSupportedException）
+  ├─ encoder.Create(ArrayBufferWriter, options) → AddFrame(w, h, Rgba32Premultiplied, metadata)
+  ├─ WriteRows(canvas.Buffer, height, canvas.Stride)   ← 预乘→直通由编码器内部完成，无临时数组
+  └─ Commit → 字节写入 MemoryStream / FileStream
 ```
 
 ---
@@ -644,11 +646,10 @@ image.Mutate(x => x
 
 **实现要点**
 
-- 解码（`ImageDecoderBridge.cs`，唯一接触 SimdCodecs 的文件）：
-  `ImageCodecs.TryReadInfo` 取 `Format`/`Orientation`/尺寸，然后两条路径：默认 `ImageCodecs.TryDecodeInto(data, canvas.Buffer, canvas.Stride, PixelFormat.Rgba32)`，解码器直接把像素写进画布，连解码器自己的输出数组都不要；目标一律是「基本 8 位」`Rgba32`，预乘格式会让编解码器退回 decode-then-convert，所以预乘仍由本地那趟 `PremultiplyInPlace` 补。直写被拒（HDR/float32/解码器不支持目标格式）时回退 `TryDecode` + `IDecodedImage.TryCopyTo` 逐行进画布。
-- 文件路径走 `ImageDecoder.Open(path)`：文件内存映射，编码字节不进托管堆，`ImageFrame.CopyPixels` 直接从映射内存解到画布（省掉 `File.ReadAllBytes` 的一次整文件分配与拷贝）。
-- ICC：2.0 的 `ImageCodecs.TryReadMetadata` 对所有格式都只扫元数据段（JPEG APP2、PNG `iCCP`、WebP `ICCP`、TIFF IFD），任何格式的 ICC 都是免费的；`ImageDecodeOptions.RequireIccProfile` 因此失效（保留类型只为源码兼容）。
-- 编码：公开 API 里没有。不透明画布的预乘缓冲逐字节就是直通缓冲，直接 `PngWriter.Encode(canvas.Buffer, w, h, new PngWriteOptions { DiscardAlpha = true })` / `JpegEncoder.Encode(canvas.Buffer, w, h, 4, options)`，零拷贝且 PNG 少压 1/4 字节；带透明的画布一步 `ImageCodecs.Encode(..., PixelFormat.Rgba32Premultiplied, ...)`，由编码门面边还原预乘边编。发布的 dll 里仍然没有 zlib/CRC/DCT，也不用背编码器的兼容性责任。用法见 misc §Q。
+- 解码（`ImageDecoderBridge.cs` + `CodecRegistry.cs`，全库唯一接触 SimdCodecs 的两个文件）：`CodecRegistry.Find(data)` 按注册顺序问每个解码器的 `CanDecode`，命中的 `ImageDecoderRegistration` 再 `TryReadInfo` 取 `Format`/`Orientation`/尺寸。然后两条路径：默认 `registration.TryDecodeInto(data, canvas.Buffer, canvas.Stride, PixelFormat.Rgba32)`，解码器直接把像素写进画布，连解码器自己的输出数组都不要；目标一律是「基本 8 位」`Rgba32`，预乘格式会让编解码器退回 decode-then-convert，所以预乘仍由本地那趟 `PremultiplyInPlace` 补。直写被拒（HDR/float32/解码器不支持目标格式）时回退 `TryDecode` + `IDecodedImage.TryCopyTo` 逐行进画布。没注册任何解码器时抛 `InvalidDataException`，消息里写明怎么注册。
+- 文件路径走 `ByteSource.FromFile(path)`：文件内存映射，编码字节不进托管堆，直接从映射内存解到画布（省掉 `File.ReadAllBytes` 的一次整文件分配与拷贝）。`ByteSource` 就在 `Abstractions` 里，不引元包也有。
+- ICC：`registration.TryReadMetadata` 对所有格式都只扫元数据段（JPEG APP2、PNG `iCCP`、WebP `ICCP`、TIFF IFD），任何格式的 ICC 都是免费的；交给 `Image` 前复制一份（元数据可能是映射内存的切片，而 `Image` 活得更久）。`ImageDecodeOptions.RequireIccProfile` 因此失效（保留类型只为源码兼容）。
+- 编码（`EncoderRegistry.cs` + `ImageExportExtensions.cs`，同样只碰 `Abstractions`）：`image.Save(path)` / `canvas.Encode(format, options)` 按 `ImageFormat` 取 `ImageEncoderRegistration`，`Create` → `AddFrame(w, h, Rgba32Premultiplied, metadata)` → `WriteRows(canvas.Buffer, height, canvas.Stride)` → `Commit`。预乘→直通在编码器内部完成，半透明图也不用临时数组；发布的 dll 里仍然没有 zlib/CRC/DCT，也不用背编码器的兼容性责任。没注册编码器时抛 `NotSupportedException` 并给出 `EncoderRegistry.Register` 示例。用法见 misc §Q。
 - 方向：2.0 的 `TryReadInfo` 已给出 `ImageInfo.Orientation`，不必自己解析 EXIF APP1。`ApplyOrientation()` 应用后把 `Orientation` 归位 `Normal`，因此重复调用无副作用（幂等，有测试）。
 - `Mutate` 的 `Resize` 会**替换并释放**旧画布，并把同一个 `DrawingContext` 重绑到新画布（`Transform` 保留）；其它方法只是薄封装，不引入额外状态。
 
@@ -712,7 +713,7 @@ image.Mutate(x => x
 
 - `dotnet build` 通过 net8.0 与 net10.0 双目标，0 warning（核心工程的 `TreatWarningsAsErrors` 建议开启，见 misc §L）。
 - `dotnet publish -r win-x64 -p:PublishAot=true` 的 smoke 工程运行结果与 JIT 一致。
-- `dotnet pack` 出来的 nupkg：`lib/net10.0/ImgProcSharp.dll` 只有 1 个，字体在 dll 内嵌，`Sdcb.SimdCodecs` 是 NuGet 依赖（不是内嵌 dll），`licenses/` 带字体许可，README 存在。
+- `dotnet pack` 出来的 nupkg：`lib/net10.0/ImgProcSharp.dll` 只有 1 个，字体在 dll 内嵌，`Sdcb.SimdCodecs.Abstractions` 是唯一 NuGet 依赖（不是内嵌 dll），`licenses/` 带字体许可，README 存在。
 
 **健壮性**
 
@@ -725,8 +726,9 @@ image.Mutate(x => x
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 引入 `Sdcb.SimdCodecs` 2.0（大版本） | 上游 API 变动 | 解码只经 `ImageDecoderBridge.cs`，2.0 迁移实测只动了这一个文件（门面 `SimdCodecs`→`ImageCodecs`、`ImagePixelFormat`→`PixelFormat`、`IccProfile`→`Metadata.Icc`）；编码依赖它自带的 `PngWriter`/`JpegEncoder`/`ImageCodecs.Encode`，不自研。见 misc §B / §Q |
-| 调用方拿不到「一键存图」 | 需要多写一行 | 不透明画布直接 `PngWriter.Encode(canvas.Buffer, w, h)`（或 `JpegEncoder.Encode`），带透明才需要 `ImageCodecs.Encode(..., Rgba32Premultiplied, ...)`；v1 明确不承诺输出编码，避免为多格式输出背兼容责任 |
+| 引入 `Sdcb.SimdCodecs` 2.0（大版本） | 上游 API 变动 | 解码只经 `ImageDecoderBridge.cs`，2.0 迁移实测只动了这一个文件；0.2.1 起再收窄到只依赖 `Abstractions`，格式实现由调用方注册（`CodecRegistry` / `EncoderRegistry`），本库不再随包携带任何格式。编码依赖子包的 `PngWriter`/`JpegEncoder`，不自研。见 misc §B / §Q |
+| 调用方拿不到「一键存图」 | 需要多写一行 | 0.2.1 起 `Image.Save` / `Canvas.Save` / `Encode` 已是一行；底下只调 `Abstractions` 的编码契约，实现来自调用方注册的子包，本库不背编码实现（`EncoderRegistry` 见 §12.2-16） |
+| 调用方忘了注册解码器 / 编码器 | 升级后 `Image.Load` / `Save` 直接失败 | 异常消息写清「引哪个包、调哪个方法」，README 顶部示例第一行就是注册；`CodecRegistry.RegisteredFormats` / `EncoderRegistry.RegisteredFormats` 可用于自检 |
 | 预乘 vs 直通 alpha 决策 | 影响所有混合内核与边界代码 | 已在 §6.1 定为预乘，M0 定稿后不再改 |
 | GlyphRaster 只有二次贝塞尔、整数笔位 | 旋转/缩放文字必须走路径慢路径 | 慢路径在 M3 就实现（`GetTextPaths` 已具备） |
 | 描边的工作量易失控（join/dash/自交/退化） | 排期风险 | 先用「圆头端点 + 圆角连接」打通（`StrokeOutline`），M6 再补 Miter/Bevel/Square/Dash；实际落地时几何部分只多出「外侧法向 + 闭式 miter 交点」和「按弧长切段」两块，没有引入新的光栅化路径 |
@@ -804,9 +806,11 @@ image.Mutate(x => x
 
 14. **迁移到 `Sdcb.SimdCodecs` 2.0**（真实收益三处，全部落在加载/保存两端）：
    - **ICC 不再需要完整解码**：2.0 的 `ImageCodecs.TryReadMetadata` 对任何格式都只扫元数据段（JPEG APP2、PNG `iCCP`、WebP `ICCP`、TIFF IFD），于是 `TryDecodeInto` 直写 + 文件头 ICC 可以同时成立。`ImageDecodeOptions.RequireIccProfile` 与 `JpegDecoder.TryReadIccProfile` 特例一起删掉（属性标 `[Obsolete]` 保留源码兼容），PNG/WebP/GIF/BMP 的 ICC 从「留空」变成「免费」。`PngIccComesFromHeader` 与 `DefaultDecodeTakesIccFromJpegHeader` 守住语义，`DirectDecodeMatchesRasterDecode`(/16-bit) 继续逐字节对拍直写与慢路径。
-   - **文件加载走内存映射**：`Image.Load(path)` 从 `File.ReadAllBytes` + `TryDecodeInto` 改成 `ImageDecoder.Open(path)` + `ImageFrame.CopyPixels`，编码字节不进托管堆，12 MP JPEG 省掉一次 5–10 MB 的分配与整块拷贝（OS 页缓存按需映射给解码器）。`LoadFromFileMatchesLoadFromMemory` 逐字节比对文件与内存两条入口。
-   - **保存不再需要 `CopyToStraight`**：不透明画布的预乘缓冲逐字节等于直通缓冲，直接把 `canvas.Buffer` 交给 `PngWriter.Encode` / `JpegEncoder.Encode`；PNG 再加 `PngWriteOptions { DiscardAlpha = true }`，alpha 通道不参与 deflate。800×600 渐变实测编码 **184.8 → 149.7 ms（−19%）**，省掉一张 `W*H*4` 数组；带透明的画布一步 `ImageCodecs.Encode(..., PixelFormat.Rgba32Premultiplied, ..., stride: canvas.Stride)`，由编码门面边还原预乘边编，peak 少一张整图缓冲。示例与基准的保存路径已全部改走这条（`docs/compare.jpg` 与迁移前逐字节相同，说明零拷贝路径没有改变输出）。
+   - **文件加载走内存映射**：`Image.Load(path)` 从 `File.ReadAllBytes` + `TryDecodeInto` 改成内存映射（2.0.0 用 `ImageDecoder.Open(path)` + `ImageFrame.CopyPixels`，0.2.1 起换成同属 `Abstractions` 的 `ByteSource.FromFile`），编码字节不进托管堆，12 MP JPEG 省掉一次 5–10 MB 的分配与整块拷贝（OS 页缓存按需映射给解码器）。`LoadFromFileMatchesLoadFromMemory` 逐字节比对文件与内存两条入口。
+   - **保存不再需要 `CopyToStraight`**：不透明画布的预乘缓冲逐字节等于直通缓冲，直接把 `canvas.Buffer` 交给 `PngWriter.Encode` / `JpegEncoder.Encode`；PNG 再加 `PngWriteOptions { DiscardAlpha = true }`，alpha 通道不参与 deflate。800×600 渐变实测编码 **184.8 → 149.7 ms（−19%）**，省掉一张 `W*H*4` 数组；带透明的画布 `Canvas.CopyToStraight` 摊成直通再编（0.2.1 起；0.2.0 用的是元包 `ImageCodecs.Encode` 的预乘直编；0.2.1 的 `Canvas.Encode` / `Save` 扩展又把这块收回到一行，见 §12.2-16）。示例与基准的保存路径已全部改走这条（`docs/compare.jpg` 与迁移前逐字节相同，说明零拷贝路径没有改变输出）。
    - **没做的**：把 `TryDecodeInto` 目标换成 `PixelFormat.Rgba32Premultiplied` 看似能省掉预乘那一趟，实测**是负优化**——`PixelFormat.IsBasic8` 只认 5 种直通格式，预乘目标会让每个编解码器退回 `ImageDecoderFallback.TryDecodeInto`（完整解码 + 转换，多一张整图缓冲），所以目标仍是 `Rgba32`、预乘留在本地做。2.0 的 `DecodeOptions`（缩放/区域解码）也没接到公开 API 上，见 §12.3。
+15. **依赖收窄到 `Abstractions`，格式由调用方注册**（0.2.1）：`PackageReference` 从元包 `Sdcb.SimdCodecs` 换成 `Sdcb.SimdCodecs.Abstractions`（0.16 MB 契约层），`ImageDecoderBridge.cs` 里的门面调用（`ImageCodecs.TryReadInfo` / `TryDecodeInto` / `TryDecode` / `TryReadMetadata` / `ImageDecoder.Open`）全部换成自建 `CodecRegistry` 查到的 `ImageDecoderRegistration` 委托。收益：NuGet 依赖不再传递 12 个格式子包（dll 合计 ≈3.1 MB），只 PNG+JPEG 的消费方从 ≈3.1 MB 降到 ≈0.95 MB；代价：`Image.Load` 前必须 `CodecRegistry.Register(...)`，未注册时抛 `InvalidDataException` 并附注册示例。文件路径改用 `ByteSource.FromFile`（同属 `Abstractions`，仍是内存映射）；ICC 交出去前 `ToArray()` 复制一份，避免 `Image` 持有已释放的映射切片（此前靠 `ImageDecoder` 内部实现兜底）。示例/测试/基准各自引 `.Png` + `.Jpeg` 并注册，测试用 `[ModuleInitializer]`。
+16. **导出收成一行扩展方法**（0.2.1）：收窄依赖后调用方要自己写 `Create` → `AddFrame` → `WriteRows` → `Commit`，半透明画布还得先 `CopyToStraight` 摊一张 `W*H*4`。新增 `EncoderRegistry`（按 `ImageFormat` 查 `ImageEncoderRegistration`，同格式后注册覆盖先注册）与 `ImageExportExtensions`（`Canvas` / `Image` 上的 `Encode` / `Save`）：把 `canvas.Buffer` + `canvas.Stride` 按 `PixelFormat.Rgba32Premultiplied` 直接交给编码器，unpremultiply 在编码器内部完成，调用方没有临时数组。`EncodePngMatchesStraightConversion` 对拍「`CopyToStraight` + `PngWriter.Encode`」逐字节相同（半透明样本含 a = 0/64/128/255），`StridedCanvasEncodesRows` 守住非紧凑 stride，`SaveRejectsUnknownExtension` / `EncodeWithoutEncoderExplainsHowToRegister` 守住两条错误消息；AOT 冒烟额外跑一次 `image.Canvas.Encode(ImageFormat.Png)` 与 `PngWriter` 输出比对，确认 AOT 下「查注册表 → 调编码器委托 → 会话式写入」整条链路可用。注意这里和 §12.2-14 的「预乘目标」结论不冲突：解码方向不能指定预乘（会退回 fallback），编码方向则必须显式声明预乘，否则编码器会把预乘值当直通像素用。
 
 ### 12.3 待评估（按性价比排序）
 
@@ -818,8 +822,8 @@ image.Mutate(x => x
 | ~~半透明填充~~ | 已落地（见 §12.2-9） | `OverSolidFullRow` 常量源特化 | **2.4×** |
 | ~~解码入口 `ToRgba8()` / 直写~~ | 已落地（见 §12.2-4/6） | 默认 `TryDecodeInto` 直写；HDR/float 才回退 `TryCopyTo` | 1080p 16.1 → 10.9 ms，分配少 7.9 MB |
 | ~~编码前 `CopyToStraight`~~ | 已落地（见 §12.2-14） | 不透明画布直喂编码器 + `DiscardAlpha` | 800×600 PNG 184.8 → 149.7 ms（−19%） |
-| ~~文件加载 `File.ReadAllBytes`~~ | 已落地（见 §12.2-14） | `ImageDecoder.Open(path)` 内存映射 | 12 MP JPEG 省一次 5–10 MB 分配与拷贝 |
-| 缩放/区域解码（2.0 `DecodeOptions`） | 未暴露 | JPEG 可在 DCT 域直接出 1/2…1/8 图、只解一块区域 | 缩略图流水线收益极大（1/8 = 少算 98% 像素）；要定尺寸协商（`TryGetClosestSize`）与 `Orientation` 交互，留到 0.3 |
+| ~~文件加载 `File.ReadAllBytes`~~ | 已落地（见 §12.2-14/15） | `ByteSource.FromFile(path)` 内存映射 | 12 MP JPEG 省一次 5–10 MB 分配与拷贝 |
+| 缩放/区域解码（2.0 `DecodeOptions`） | 未暴露 | JPEG 可在 DCT 域直接出 1/2…1/8 图、只解一块区域 | 缩略图流水线收益极大（1/8 = 少算 98% 像素）；要定尺寸协商（`TryGetClosestSize`）与 `Orientation` 交互，留到 0.4 |
 | ~~`Resizer` 中间缓冲~~ | 已落地（见 §12.2-13） | 8 MB 预算分带 | 4K 分配 −77%，速度不变 |
 | 渐变混合内核 | 11.3 ns/px（1024×768 实测 8.5 ms） | 2 停特化、覆盖 255 且不透明时跳过 `BlendPixel` | 已做过差分游标/预计算倒数；再往下要改 `t` 的逐像素累加顺序，会破坏逐字节一致（§12.4），不做 |
 | `ScanlineRasterizer` | 每子扫描线排序 + 浮点累加 | 定点覆盖 + AET 增量排序 | 中等，改动面大 |

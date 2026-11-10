@@ -5,12 +5,15 @@
     <AssemblyName>ImgProcSharp</AssemblyName>
     <RootNamespace>ImgProcSharp</RootNamespace>
     <PackageId>Sevencat.ImgproSharp</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <Authors>Sevencat</Authors>
     <Description>Drawing for Sdcb.SimdCodecs: shapes, gradients, strokes and TrueType text over decoded pixels, with no native dependency. AOT-compatible.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>drawing;graphics;skia-free;image;simd;decoding</PackageTags>
+    <PackageProjectUrl>https://github.com/sevencat/ImgProcSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sevencat/ImgProcSharp.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <IncludeBuildOutput>true</IncludeBuildOutput>
   </PropertyGroup>
@@ -36,7 +39,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Sdcb.SimdCodecs" />
+    <!-- 只依赖契约：格式解码器由上层注册（见 CodecRegistry），本包不连带任何格式实现 -->
+    <PackageReference Include="Sdcb.SimdCodecs.Abstractions" />
   </ItemGroup>
 
 </Project>

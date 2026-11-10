@@ -1,6 +1,4 @@
-using Sdcb.SimdCodecs;
 using Sdcb.SimdCodecs.Abstractions;
-using SimdCodecsApi = Sdcb.SimdCodecs.ImageCodecs;
 
 namespace ImgProcSharp;
 
@@ -8,32 +6,32 @@ namespace ImgProcSharp;
 /// <summary>
 /// 解码桥：全库唯一接触 <c>Sdcb.SimdCodecs</c> 的文件。
 /// <para>
-/// 其余代码只认识 <see cref="Canvas"/>（预乘 RGBA8），换解码库只改这里。
+/// 本程序集只依赖 <c>Sdcb.SimdCodecs.Abstractions</c>——格式解码器由上层注册到 <see cref="CodecRegistry"/>，
+/// 所以引用本库不会连带任何格式包。其余代码只认识 <see cref="Canvas"/>（预乘 RGBA8），换解码库只改这里。
 /// </para>
 /// </summary>
 internal static class ImageDecoderBridge
 {
     internal static Image Decode(ReadOnlySpan<byte> data)
     {
-        if (!SimdCodecsApi.TryReadInfo(data, out ImageInfo info))
+        ImageDecoderRegistration codec = Require(data);
+
+        if (!codec.TryReadInfo(data, out ImageInfo info))
         {
-            throw new InvalidDataException("无法识别的图像格式：Sdcb.SimdCodecs 不支持或数据不完整。");
+            throw new InvalidDataException("无法解析图像头：数据不完整或已损坏。");
         }
 
-        return new Image(DecodeCanvas(data, info), info.Format, ReadIccProfile(data), info.Orientation);
+        return new Image(DecodeCanvas(codec, data, info), info.Format, ReadIccProfile(codec, data), info.Orientation);
     }
 
     /// <summary>
-    /// 从文件解码：<c>ImageDecoder.Open(path)</c> 把文件内存映射进来，整份编码数据不进托管堆——
+    /// 从文件解码：<c>ByteSource.FromFile(path)</c> 把文件内存映射进来，整份编码数据不进托管堆——
     /// 12 MP 的 JPEG 省掉一次 5–10 MB 的 <c>File.ReadAllBytes</c> 分配与拷贝。
     /// </summary>
     internal static Image DecodeFile(string path)
     {
-        using ImageDecoder decoder = ImageDecoder.Open(path);
-        ImageFrame frame = decoder.GetFrame(0);
-        ImageInfo info = frame.Info;
-
-        return new Image(DecodeCanvas(frame, info), info.Format, ReadMetadata(frame.Metadata), info.Orientation);
+        using IByteSource source = ByteSource.FromFile(path);
+        return Decode(source.GetMemory().Span);
     }
 
     /// <summary>
@@ -42,19 +40,26 @@ internal static class ImageDecoderBridge
     /// </summary>
     internal static Canvas DecodeThroughRaster(ReadOnlySpan<byte> data)
     {
-        if (!SimdCodecsApi.TryReadInfo(data, out ImageInfo info))
+        ImageDecoderRegistration codec = Require(data);
+
+        if (!codec.TryReadInfo(data, out ImageInfo info))
         {
-            throw new InvalidDataException("无法识别的图像格式：Sdcb.SimdCodecs 不支持或数据不完整。");
+            throw new InvalidDataException("无法解析图像头：数据不完整或已损坏。");
         }
 
-        return DecodeThroughRaster(data, info);
+        return DecodeThroughRaster(codec, data, info);
     }
 
-    private static Canvas DecodeCanvas(ReadOnlySpan<byte> data, ImageInfo info) =>
-        TryDecodeInto(data, info) ?? DecodeThroughRaster(data, info);
+    /// <summary>认领数据的解码器；一个都没注册时把「怎么注册」写进异常消息。</summary>
+    private static ImageDecoderRegistration Require(ReadOnlySpan<byte> data) =>
+        CodecRegistry.Find(data) ?? throw new InvalidDataException(
+            CodecRegistry.IsEmpty
+                ? "没有注册任何解码器：先引用所需的格式包（如 Sdcb.SimdCodecs.Png、Sdcb.SimdCodecs.Jpeg），"
+                  + "再在启动时调用 CodecRegistry.Register(PngImageDecoder.Registration, JpegImageDecoder.Registration)。"
+                : "无法识别的图像格式：已注册的解码器都不认这段数据（格式不在支持范围内，或数据不完整）。");
 
-    private static Canvas DecodeCanvas(ImageFrame frame, ImageInfo info) =>
-        TryCopyPixels(frame, info) ?? DecodeThroughRaster(frame, info);
+    private static Canvas DecodeCanvas(ImageDecoderRegistration codec, ReadOnlySpan<byte> data, ImageInfo info) =>
+        TryDecodeInto(codec, data, info) ?? DecodeThroughRaster(codec, data, info);
 
     /// <summary>
     /// 直写路径：<c>TryDecodeInto</c> 把像素直接写进画布缓冲，全程没有解码器输出数组。
@@ -63,47 +68,27 @@ internal static class ImageDecoderBridge
     /// 所以预乘仍由本地那趟 <see cref="Premultiply"/> 补，见 plan §12.2-7。
     /// 解码器拒绝目标格式（或 HDR 文件拒绝 8 位投影）时返回 <see langword="null"/>，由调用方回退慢路径。
     /// </summary>
-    private static Canvas? TryDecodeInto(ReadOnlySpan<byte> data, ImageInfo info)
+    private static Canvas? TryDecodeInto(ImageDecoderRegistration codec, ReadOnlySpan<byte> data, ImageInfo info)
     {
+        if (codec.TryDecodeInto is not { } decodeInto)
+        {
+            return null;
+        }
+
         Canvas canvas = Canvas.Create(info.Width, info.Height);
         try
         {
-            if (!SimdCodecsApi.TryDecodeInto(
+            if (!decodeInto(
                     data,
                     canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height),
                     canvas.Stride,
-                    PixelFormat.Rgba32))
+                    PixelFormat.Rgba32,
+                    options: null,
+                    cancellationToken: default))
             {
                 canvas.Dispose();
                 return null;
             }
-
-            if (NeedsPremultiply(canvas, info))
-            {
-                Premultiply(canvas);
-            }
-
-            return canvas;
-        }
-        catch (Exception e) when (e is InvalidDataException or ArgumentException or NotSupportedException)
-        {
-            canvas.Dispose();
-            return null;
-        }
-        catch
-        {
-            canvas.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>文件路径的直写版本：<see cref="ImageFrame.CopyPixels"/> 是从映射内存直接解到画布，失败时抛异常。</summary>
-    private static Canvas? TryCopyPixels(ImageFrame frame, ImageInfo info)
-    {
-        Canvas canvas = Canvas.Create(info.Width, info.Height);
-        try
-        {
-            frame.CopyPixels(null, PixelFormat.Rgba32, canvas.Buffer.AsSpan(0, canvas.Stride * canvas.Height), canvas.Stride);
 
             if (NeedsPremultiply(canvas, info))
             {
@@ -155,17 +140,22 @@ internal static class ImageDecoderBridge
     }
 
     /// <summary>
-    /// ICC：2.0 的 <c>TryReadMetadata</c> 对所有格式都只扫元数据段（JPEG APP2、PNG <c>iCCP</c>、
-    /// WebP <c>ICCP</c>、TIFF IFD…），完全不碰像素。1.4 时代只有 JPEG 公开了这种读取，
-    /// PNG/WebP 想要 ICC 得完整解码一遍；现在任何格式都是免费的。
+    /// ICC：<c>TryReadMetadata</c> 对所有格式都只扫元数据段（JPEG APP2、PNG <c>iCCP</c>、
+    /// WebP <c>ICCP</c>、TIFF IFD…），完全不碰像素。这里复制一份再交给 <see cref="Image"/>：
+    /// 元数据可能是调用方缓冲（或刚释放的映射内存）的切片，而 <see cref="Image"/> 活得比它久。
     /// </summary>
-    private static ReadOnlyMemory<byte> ReadIccProfile(ReadOnlySpan<byte> data)
+    private static ReadOnlyMemory<byte> ReadIccProfile(ImageDecoderRegistration codec, ReadOnlySpan<byte> data)
     {
         try
         {
-            return SimdCodecsApi.TryReadMetadata(data, out ImageMetadata? metadata)
-                ? metadata.Icc
-                : ReadOnlyMemory<byte>.Empty;
+            if (codec.TryReadMetadata is not { } readMetadata
+                || !readMetadata(data, out ImageMetadata? metadata)
+                || metadata is null)
+            {
+                return ReadOnlyMemory<byte>.Empty;
+            }
+
+            return metadata.Icc.IsEmpty ? ReadOnlyMemory<byte>.Empty : metadata.Icc.ToArray();
         }
         catch (Exception e) when (e is InvalidDataException or ArgumentException or NotSupportedException or IndexOutOfRangeException)
         {
@@ -174,23 +164,15 @@ internal static class ImageDecoderBridge
         }
     }
 
-    private static ReadOnlyMemory<byte> ReadMetadata(ImageMetadata? metadata) =>
-        metadata?.Icc ?? ReadOnlyMemory<byte>.Empty;
-
-    private static Canvas DecodeThroughRaster(ReadOnlySpan<byte> data, ImageInfo info)
+    private static Canvas DecodeThroughRaster(ImageDecoderRegistration codec, ReadOnlySpan<byte> data, ImageInfo info)
     {
-        if (!SimdCodecsApi.TryDecode(data, out IDecodedImage? decoded) || decoded is null)
+        if (codec.TryDecode is not { } tryDecode
+            || !tryDecode(data, out IDecodedImage? decoded, options: null, cancellationToken: default)
+            || decoded is null)
         {
             throw new InvalidDataException($"解码失败：{info.Format} {info.Width}×{info.Height}。");
         }
 
-        using IDisposable? decodedLifetime = decoded as IDisposable;
-        return ConvertIntoCanvas(decoded, info);
-    }
-
-    private static Canvas DecodeThroughRaster(ImageFrame frame, ImageInfo info)
-    {
-        IDecodedImage decoded = frame.Decode();
         using IDisposable? decodedLifetime = decoded as IDisposable;
         return ConvertIntoCanvas(decoded, info);
     }
